@@ -1,8 +1,15 @@
 #ifndef UMS_MODULE
 #define UMS_MODULE
 
-#define DEVICE_NAME "ums_device"
+#include <linux/types.h>
+
 #define SUCCESS 0
+
+typedef struct worker_thread {
+	pid_t id;
+	struct list_head node;
+	pid_t scheduler;
+} worker_thread_t;
 
 int init_module(void);
 void cleanup_module(void);
