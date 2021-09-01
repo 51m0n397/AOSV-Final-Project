@@ -5,10 +5,16 @@
 
 #define SUCCESS 0
 
+#define UMS_NEW 0
+#define UMS_RUNNING 1
+#define UMS_YIELD 2
+#define UMS_DEAD 3
+
 typedef struct worker_thread {
 	pid_t id;
 	struct list_head node;
 	pid_t scheduler;
+	int state;
 } worker_thread_t;
 
 int init_module(void);

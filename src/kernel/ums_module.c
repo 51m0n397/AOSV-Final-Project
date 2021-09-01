@@ -55,6 +55,7 @@ static long device_ioctl(struct file *file, unsigned int request,
 	pid_t pid;
 	worker_thread_t *worker;
 	struct task_struct *pcb;
+	int ret;
 
 	switch (request) {
 	case REGISTER_WORKER_THREAD:
@@ -68,12 +69,13 @@ static long device_ioctl(struct file *file, unsigned int request,
 
 		worker->id = current->pid;
 		worker->scheduler = -1;
+		worker->state = UMS_NEW;
 
 		mutex_lock(&list_mutex);
 		list_add(&worker->node, &worker_threads);
 		mutex_unlock(&list_mutex);
 
-		set_current_state(TASK_UNINTERRUPTIBLE);
+		set_current_state(TASK_KILLABLE);
 		schedule();
 
 		return SUCCESS;
@@ -83,6 +85,7 @@ static long device_ioctl(struct file *file, unsigned int request,
 		       current->pid);
 
 		mutex_lock(&list_mutex);
+
 		list_for_each_entry (worker, &worker_threads, node) {
 			if (worker->id == current->pid)
 				break;
@@ -94,8 +97,8 @@ static long device_ioctl(struct file *file, unsigned int request,
 		}
 
 		pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
+		worker->state = UMS_DEAD;
 
-		kfree(worker);
 		mutex_unlock(&list_mutex);
 
 		wake_up_process(pcb);
@@ -123,12 +126,51 @@ static long device_ioctl(struct file *file, unsigned int request,
 		}
 
 		worker->scheduler = current->pid;
+		worker->state = UMS_RUNNING;
 		pcb = pid_task(find_vpid(worker->id), PIDTYPE_PID);
 
 		mutex_unlock(&list_mutex);
 
 		wake_up_process(pcb);
-		set_current_state(TASK_UNINTERRUPTIBLE);
+		set_current_state(TASK_KILLABLE);
+		schedule();
+
+		/* after context switch */
+		mutex_lock(&list_mutex);
+
+		ret = WORKER_YIELDED;
+
+		if (worker->state == UMS_DEAD) {
+			ret = WORKER_TERMINATED;
+			kfree(worker);
+		}
+
+		mutex_unlock(&list_mutex);
+
+		return ret;
+	case UMS_THREAD_YIELD:
+		printk(KERN_DEBUG MODULE_NAME_LOG "UMS_THREAD_YIELD pid:%d\n",
+		       current->pid);
+
+		mutex_lock(&list_mutex);
+
+		list_for_each_entry (worker, &worker_threads, node) {
+			if (worker->id == current->pid)
+				break;
+		}
+
+		if (worker == NULL) {
+			mutex_unlock(&list_mutex);
+			return -ENOENT;
+		}
+
+		pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
+		worker->state = UMS_YIELD;
+
+		mutex_unlock(&list_mutex);
+
+		wake_up_process(pcb);
+		set_current_state(TASK_KILLABLE);
 		schedule();
 
 		return SUCCESS;

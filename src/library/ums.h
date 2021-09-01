@@ -2,17 +2,25 @@
 #define UMS
 
 #include <sys/types.h>
+#include <semaphore.h>
 
-typedef struct ums_completion_list_node {
+typedef struct ums_list_node {
 	pid_t thread;
-	struct ums_completion_list_node *next;
-} ums_completion_list_node_t;
+	struct ums_list_node *next;
+} ums_list_node_t;
 
 typedef struct {
-	ums_completion_list_node_t *head;
-	ums_completion_list_node_t *tail;
+	ums_list_node_t *head;
+	ums_list_node_t *tail;
+	sem_t avaliable_sem;
 	int size;
 } ums_completion_list_t;
+
+typedef struct {
+	ums_list_node_t *head;
+	ums_list_node_t *tail;
+	int size;
+} ready_queue_t;
 
 typedef void (*scheduler_entrypoint_t)(
 	ums_completion_list_t *ums_completion_list);
@@ -21,8 +29,8 @@ int register_worker_thread();
 
 int worker_thread_terminated();
 
-void enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
-			       ums_completion_list_t *ums_completion_list);
+int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
+			      ums_completion_list_t *ums_completion_list);
 
 ums_completion_list_t *create_ums_completion_list();
 
@@ -32,5 +40,20 @@ int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
 				pid_t thread);
 
 int execute_ums_thread(pid_t thread);
+
+ums_list_node_t *
+dequeue_ums_completion_list(ums_completion_list_t *ums_completion_list);
+
+ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread);
+
+int ums_thread_yield();
+
+ready_queue_t *create_ready_queue();
+
+void delete_ready_queue(ready_queue_t *ready_queue);
+
+int enqueue_ready_queue(ready_queue_t *ready_queue, pid_t thread);
+
+pid_t dequeue_ready_queue(ready_queue_t *ready_queue);
 
 #endif
