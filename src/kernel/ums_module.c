@@ -22,7 +22,7 @@ static struct miscdevice mdev = { .minor = 0,
 				  .fops = &fops };
 
 static LIST_HEAD(worker_threads);
-static DEFINE_MUTEX(list_mutex);
+static DEFINE_MUTEX(worker_mutex);
 
 int init_module(void)
 {
@@ -60,10 +60,11 @@ int __register_worker_thread(pid_t id)
 	worker->id = id;
 	worker->scheduler = -1;
 	worker->state = UMS_NEW;
+	mutex_init(&worker->lock);
 
-	mutex_lock(&list_mutex);
+	mutex_lock(&worker_mutex);
 	list_add(&worker->node, &worker_threads);
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&worker_mutex);
 
 	set_current_state(TASK_KILLABLE);
 	schedule();
@@ -76,22 +77,21 @@ int __worker_thread_terminated(pid_t id)
 	worker_thread_t *worker;
 	struct task_struct *pcb;
 
-	mutex_lock(&list_mutex);
-
+	mutex_lock(&worker_mutex);
 	list_for_each_entry (worker, &worker_threads, node) {
 		if (worker->id == id)
 			break;
 	}
+	mutex_unlock(&worker_mutex);
 
 	if (worker == NULL) {
-		mutex_unlock(&list_mutex);
 		return -ENOENT;
 	}
 
+	mutex_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_DEAD;
-
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&worker->lock);
 
 	wake_up_process(pcb);
 	schedule();
@@ -103,40 +103,42 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 {
 	worker_thread_t *worker;
 	struct task_struct *pcb;
-	int ret;
+	int ret, state;
 
-	mutex_lock(&list_mutex);
+	mutex_lock(&worker_mutex);
 	list_for_each_entry (worker, &worker_threads, node) {
 		if (worker->id == worker_id)
 			break;
 	}
+	mutex_unlock(&worker_mutex);
 
 	if (worker == NULL) {
-		mutex_unlock(&list_mutex);
 		return -ENOENT;
 	}
 
+	mutex_lock(&worker->lock);
 	worker->scheduler = sched_id;
 	worker->state = UMS_RUNNING;
 	pcb = pid_task(find_vpid(worker->id), PIDTYPE_PID);
-
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&worker->lock);
 
 	wake_up_process(pcb);
 	set_current_state(TASK_KILLABLE);
 	schedule();
 
 	/* after context switch */
-	mutex_lock(&list_mutex);
+	mutex_lock(&worker->lock);
+	state = worker->state;
+	mutex_unlock(&worker->lock);
 
 	ret = WORKER_YIELDED;
-
-	if (worker->state == UMS_DEAD) {
+	if (state == UMS_DEAD) {
 		ret = WORKER_TERMINATED;
+		mutex_lock(&worker_mutex);
+		list_del(&worker->node);
 		kfree(worker);
+		mutex_unlock(&worker_mutex);
 	}
-
-	mutex_unlock(&list_mutex);
 
 	return ret;
 }
@@ -146,22 +148,21 @@ int __ums_thread_yield(pid_t id)
 	worker_thread_t *worker;
 	struct task_struct *pcb;
 
-	mutex_lock(&list_mutex);
-
+	mutex_lock(&worker_mutex);
 	list_for_each_entry (worker, &worker_threads, node) {
 		if (worker->id == id)
 			break;
 	}
+	mutex_unlock(&worker_mutex);
 
 	if (worker == NULL) {
-		mutex_unlock(&list_mutex);
 		return -ENOENT;
 	}
 
+	mutex_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_YIELD;
-
-	mutex_unlock(&list_mutex);
+	mutex_unlock(&worker->lock);
 
 	wake_up_process(pcb);
 	set_current_state(TASK_KILLABLE);

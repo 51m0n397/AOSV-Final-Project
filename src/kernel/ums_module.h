@@ -15,6 +15,7 @@ typedef struct worker_thread {
 	struct list_head node;
 	pid_t scheduler;
 	int state;
+	struct mutex lock;
 } worker_thread_t;
 
 int init_module(void);
