@@ -12,10 +12,10 @@
 
 struct worker_thread {
 	pid_t id;
-	struct list_head node;
+	struct rhash_head node;
+	struct mutex lock;
 	pid_t scheduler;
 	int state;
-	struct mutex lock;
 };
 
 int init_module(void);

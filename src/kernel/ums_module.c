@@ -3,6 +3,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/rhashtable.h>
 
 #include "ums_module.h"
 #include "ums_interface.h"
@@ -21,7 +22,13 @@ static struct miscdevice mdev = { .minor = 0,
 				  .mode = S_IALLUGO,
 				  .fops = &fops };
 
-static LIST_HEAD(worker_threads);
+const static struct rhashtable_params worker_thread_table_params = {
+	.key_len = sizeof(pid_t),
+	.key_offset = offsetof(struct worker_thread, id),
+	.head_offset = offsetof(struct worker_thread, node),
+};
+
+struct rhashtable worker_threads;
 static DEFINE_MUTEX(worker_mutex);
 
 int init_module(void)
@@ -36,14 +43,24 @@ int init_module(void)
 		       "Registering char device failed\n");
 		return ret;
 	}
-
 	printk(KERN_DEBUG MODULE_NAME_LOG "Device registered successfully\n");
+
+	ret = rhashtable_init(&worker_threads, &worker_thread_table_params);
+	if (ret < 0) {
+		printk(KERN_ALERT MODULE_NAME_LOG
+		       "Creating worker thread table failed\n");
+		return ret;
+	}
+	printk(KERN_DEBUG MODULE_NAME_LOG
+	       "Worker thread table created successfully\n");
 
 	return SUCCESS;
 }
 
 void cleanup_module(void)
 {
+	rhashtable_destroy(&worker_threads);
+
 	misc_deregister(&mdev);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "exit\n");
@@ -52,6 +69,7 @@ void cleanup_module(void)
 int __register_worker_thread(pid_t id)
 {
 	struct worker_thread *worker;
+	int ret;
 
 	worker = kzalloc(sizeof(struct worker_thread), GFP_KERNEL);
 	if (worker == NULL)
@@ -63,8 +81,14 @@ int __register_worker_thread(pid_t id)
 	mutex_init(&worker->lock);
 
 	mutex_lock(&worker_mutex);
-	list_add(&worker->node, &worker_threads);
+	ret = rhashtable_lookup_insert_fast(&worker_threads, &worker->node,
+					    worker_thread_table_params);
 	mutex_unlock(&worker_mutex);
+
+	if (ret < 0) {
+		kfree(worker);
+		return ret;
+	}
 
 	set_current_state(TASK_KILLABLE);
 	schedule();
@@ -78,15 +102,12 @@ int __worker_thread_terminated(pid_t id)
 	struct task_struct *pcb;
 
 	mutex_lock(&worker_mutex);
-	list_for_each_entry (worker, &worker_threads, node) {
-		if (worker->id == id)
-			break;
-	}
+	worker = rhashtable_lookup_fast(&worker_threads, &id,
+					worker_thread_table_params);
 	mutex_unlock(&worker_mutex);
 
-	if (worker == NULL) {
+	if (worker == NULL)
 		return -ENOENT;
-	}
 
 	mutex_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
@@ -106,15 +127,12 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	int ret, state;
 
 	mutex_lock(&worker_mutex);
-	list_for_each_entry (worker, &worker_threads, node) {
-		if (worker->id == worker_id)
-			break;
-	}
+	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
+					worker_thread_table_params);
 	mutex_unlock(&worker_mutex);
 
-	if (worker == NULL) {
+	if (worker == NULL)
 		return -ENOENT;
-	}
 
 	mutex_lock(&worker->lock);
 	worker->scheduler = sched_id;
@@ -135,7 +153,8 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	if (state == UMS_DEAD) {
 		ret = WORKER_TERMINATED;
 		mutex_lock(&worker_mutex);
-		list_del(&worker->node);
+		rhashtable_remove_fast(&worker_threads, &worker->node,
+				       worker_thread_table_params);
 		kfree(worker);
 		mutex_unlock(&worker_mutex);
 	}
@@ -149,15 +168,12 @@ int __ums_thread_yield(pid_t id)
 	struct task_struct *pcb;
 
 	mutex_lock(&worker_mutex);
-	list_for_each_entry (worker, &worker_threads, node) {
-		if (worker->id == id)
-			break;
-	}
+	worker = rhashtable_lookup_fast(&worker_threads, &id,
+					worker_thread_table_params);
 	mutex_unlock(&worker_mutex);
 
-	if (worker == NULL) {
+	if (worker == NULL)
 		return -ENOENT;
-	}
 
 	mutex_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
