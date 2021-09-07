@@ -51,9 +51,9 @@ void cleanup_module(void)
 
 int __register_worker_thread(pid_t id)
 {
-	worker_thread_t *worker;
+	struct worker_thread *worker;
 
-	worker = kzalloc(sizeof(worker_thread_t), GFP_KERNEL);
+	worker = kzalloc(sizeof(struct worker_thread), GFP_KERNEL);
 	if (worker == NULL)
 		return -ENOMEM;
 
@@ -74,7 +74,7 @@ int __register_worker_thread(pid_t id)
 
 int __worker_thread_terminated(pid_t id)
 {
-	worker_thread_t *worker;
+	struct worker_thread *worker;
 	struct task_struct *pcb;
 
 	mutex_lock(&worker_mutex);
@@ -101,7 +101,7 @@ int __worker_thread_terminated(pid_t id)
 
 int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 {
-	worker_thread_t *worker;
+	struct worker_thread *worker;
 	struct task_struct *pcb;
 	int ret, state;
 
@@ -145,7 +145,7 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 
 int __ums_thread_yield(pid_t id)
 {
-	worker_thread_t *worker;
+	struct worker_thread *worker;
 	struct task_struct *pcb;
 
 	mutex_lock(&worker_mutex);
