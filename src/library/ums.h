@@ -9,40 +9,36 @@ typedef struct ums_list_node {
 	struct ums_list_node *next;
 } ums_list_node_t;
 
-typedef struct {
-	ums_list_node_t *head;
-	ums_list_node_t *tail;
-	sem_t avaliable_sem;
-	int size;
-} ums_completion_list_t;
-
-typedef struct {
+struct ums_list {
 	ums_list_node_t *head;
 	ums_list_node_t *tail;
 	int size;
-} ready_queue_t;
+};
 
-typedef void (*scheduler_entrypoint_t)(
-	ums_completion_list_t *ums_completion_list);
+typedef struct ums_list ums_completion_list_t;
+typedef struct ums_list ready_queue_t;
+
+typedef void (*scheduler_entrypoint_t)();
 
 int register_worker_thread();
+
+int worker_wait_for_scheduler();
 
 int worker_thread_terminated();
 
 int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
-			      ums_completion_list_t *ums_completion_list);
+															ums_completion_list_t *ums_completion_list);
 
 ums_completion_list_t *create_ums_completion_list();
 
 void delete_ums_completion_list(ums_completion_list_t *ums_completion_list);
 
 int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
-				pid_t thread);
+																pid_t thread);
 
 int execute_ums_thread(pid_t thread);
 
-ums_list_node_t *
-dequeue_ums_completion_list(ums_completion_list_t *ums_completion_list);
+int dequeue_ums_completion_list(ums_list_node_t **list);
 
 ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread);
 

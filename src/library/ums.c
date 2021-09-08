@@ -4,14 +4,10 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <errno.h>
+#include <stdio.h>
 
 #include "../kernel/ums_interface.h"
 #include "ums.h"
-
-typedef struct {
-	scheduler_entrypoint_t scheduler_entrypoint;
-	ums_completion_list_t *ums_completion_list;
-} entrypoint_key_t;
 
 pthread_key_t entrypoint_key;
 pthread_once_t entrypoint_key_once = PTHREAD_ONCE_INIT;
@@ -35,6 +31,11 @@ int register_worker_thread()
 	return ums_syscall(REGISTER_WORKER_THREAD, NULL);
 }
 
+int worker_wait_for_scheduler()
+{
+	return ums_syscall(WORKER_WAIT_FOR_SCHEDULER, NULL);
+}
+
 int worker_thread_terminated()
 {
 	return ums_syscall(WORKER_THREAD_TERMINATED, NULL);
@@ -47,22 +48,39 @@ void create_entrypoint_key()
 }
 
 int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
-			      ums_completion_list_t *ums_completion_list)
+															ums_completion_list_t *ums_completion_list)
 {
 	int ret;
 
 	pthread_once(&entrypoint_key_once, create_entrypoint_key);
 
-	entrypoint_key_t key;
-
-	key.scheduler_entrypoint = scheduler_entrypoint;
-	key.ums_completion_list = ums_completion_list;
-
-	ret = pthread_setspecific(entrypoint_key, &key);
+	ret = pthread_setspecific(entrypoint_key, scheduler_entrypoint);
 	if (ret != 0)
 		return -1;
 
-	scheduler_entrypoint(ums_completion_list);
+	pid_t workers[ums_completion_list->size];
+
+	struct thread_list list;
+	list.size = 0;
+	list.threads = workers;
+
+	ums_list_node_t *ptr = ums_completion_list->head;
+
+	while (ptr != NULL) {
+		workers[list.size] = ptr->thread;
+		list.size++;
+		ptr = ptr->next;
+	}
+
+	ret = ums_syscall(REGISTER_SCHEDULER_THREAD, &list);
+	if (ret < 0)
+		return ret;
+
+	scheduler_entrypoint();
+
+	ret = ums_syscall(SCHEDULER_THREAD_TERMINATED, NULL);
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -74,12 +92,6 @@ ums_completion_list_t *create_ums_completion_list()
 
 	if (ums_completion_list == NULL)
 		return NULL;
-
-	int ret = sem_init(&ums_completion_list->avaliable_sem, 0, 0);
-	if (ret == -1) {
-		free(ums_completion_list);
-		return NULL;
-	}
 
 	ums_completion_list->head = NULL;
 	ums_completion_list->tail = NULL;
@@ -96,12 +108,11 @@ void delete_ums_completion_list(ums_completion_list_t *ums_completion_list)
 		free(to_be_deleted);
 	}
 
-	sem_destroy(&ums_completion_list->avaliable_sem);
 	free(ums_completion_list);
 }
 
 int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
-				pid_t thread)
+																pid_t thread)
 {
 	ums_list_node_t *new_node =
 		(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
@@ -114,7 +125,6 @@ int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
 	if (ums_completion_list->size == 0) {
 		ums_completion_list->head = new_node;
 		ums_completion_list->tail = new_node;
-		sem_post(&ums_completion_list->avaliable_sem);
 	} else {
 		ums_completion_list->tail->next = new_node;
 		ums_completion_list->tail = new_node;
@@ -128,38 +138,60 @@ int execute_ums_thread(pid_t thread)
 {
 	int ret = ums_syscall(EXECUTE_UMS_THREAD, &thread);
 
-	if (ret == -1) {
+	if (ret < 0) {
 		/* error, thread not executed */
 		return -1;
-	} else if (ret == WORKER_YIELDED) {
-		entrypoint_key_t *key =
-			(entrypoint_key_t *)pthread_getspecific(entrypoint_key);
-		if (key == NULL) {
-			return -1;
-		}
-
-		enqueue_ums_completion_list(key->ums_completion_list, thread);
-		key->scheduler_entrypoint(key->ums_completion_list);
 	}
+
+	scheduler_entrypoint_t scheduler_entrypoint =
+		(scheduler_entrypoint_t)pthread_getspecific(entrypoint_key);
+	if (scheduler_entrypoint == NULL) {
+		return -1;
+	}
+
+	scheduler_entrypoint();
 
 	return 0;
 }
 
-ums_list_node_t *
-dequeue_ums_completion_list(ums_completion_list_t *ums_completion_list)
+int dequeue_ums_completion_list(ums_list_node_t **list)
 {
-	while (sem_wait(&ums_completion_list->avaliable_sem)) {
-		if (errno != EINTR) {
-			return NULL;
+	int size = ums_syscall(DEQUEUE_UMS_COMPLETION_LIST_ITEMS, NULL);
+	if (size < 0)
+		return -1;
+
+	if (size == 0) {
+		return 0;
+	}
+
+	pid_t *dequeued_list = malloc(sizeof(pid_t) * size);
+
+	int ret = ums_syscall(GET_DEQUEUED_ITEMS, dequeued_list);
+	if (ret < 0) {
+		free(dequeued_list);
+		return -1;
+	}
+
+	ums_list_node_t *tail = NULL;
+	for (int i = 0; i < size; i++) {
+		ums_list_node_t *new_node =
+			(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
+
+		new_node->thread = dequeued_list[i];
+		new_node->next = NULL;
+
+		if (*list == NULL) {
+			*list = new_node;
+			tail = new_node;
+		} else {
+			tail->next = new_node;
+			tail = new_node;
 		}
 	}
-	ums_list_node_t *ums_thread_list = ums_completion_list->head;
 
-	ums_completion_list->head = NULL;
-	ums_completion_list->tail = NULL;
-	ums_completion_list->size = 0;
+	free(dequeued_list);
 
-	return ums_thread_list;
+	return 1;
 }
 
 ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread)
@@ -176,8 +208,7 @@ int ums_thread_yield()
 
 ready_queue_t *create_ready_queue()
 {
-	ready_queue_t *ready_queue =
-		(ready_queue_t *)malloc(sizeof(ready_queue_t));
+	ready_queue_t *ready_queue = (ready_queue_t *)malloc(sizeof(ready_queue_t));
 
 	if (ready_queue == NULL)
 		return NULL;
