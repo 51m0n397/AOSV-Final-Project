@@ -111,8 +111,8 @@ void delete_ums_completion_list(ums_completion_list_t *ums_completion_list)
 	free(ums_completion_list);
 }
 
-int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
-																pid_t thread)
+int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
+																		 pid_t thread)
 {
 	ums_list_node_t *new_node =
 		(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
@@ -154,7 +154,7 @@ int execute_ums_thread(pid_t thread)
 	return 0;
 }
 
-int dequeue_ums_completion_list(ums_list_node_t **list)
+int dequeue_ums_completion_list_items(ums_list_node_t **list)
 {
 	int size = ums_syscall(DEQUEUE_UMS_COMPLETION_LIST_ITEMS, NULL);
 	if (size < 0)

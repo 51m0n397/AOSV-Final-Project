@@ -22,7 +22,7 @@ void scheduler_entrypoint()
 	if (ready_queue->size == 0) {
 		ums_list_node_t *available_thread = NULL;
 
-		dequeue_ums_completion_list(&available_thread);
+		dequeue_ums_completion_list_items(&available_thread);
 
 		while (available_thread != NULL) {
 			enqueue_ready_queue(ready_queue, available_thread->thread);
@@ -82,10 +82,10 @@ int main(int argc, char *argv[])
 		while (pid == -1) {
 		};
 
-		enqueue_ums_completion_list(list_1, pid);
+		enqueue_ums_completion_list_item(list_1, pid);
 
 		if (i % 2) {
-			enqueue_ums_completion_list(list_2, pid);
+			enqueue_ums_completion_list_item(list_2, pid);
 		}
 	}
 

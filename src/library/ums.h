@@ -33,12 +33,12 @@ ums_completion_list_t *create_ums_completion_list();
 
 void delete_ums_completion_list(ums_completion_list_t *ums_completion_list);
 
-int enqueue_ums_completion_list(ums_completion_list_t *ums_completion_list,
-																pid_t thread);
+int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
+																		 pid_t thread);
 
 int execute_ums_thread(pid_t thread);
 
-int dequeue_ums_completion_list(ums_list_node_t **list);
+int dequeue_ums_completion_list_items(ums_list_node_t **list);
 
 ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread);
 
