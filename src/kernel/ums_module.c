@@ -43,44 +43,48 @@ static DECLARE_RWSEM(worker_lock);
 int init_module(void)
 {
 	int ret;
-	printk(KERN_DEBUG MODULE_NAME_LOG "init\n");
+	printk(KERN_DEBUG MODULE_NAME_LOG "Initializing module\n");
 
 	ret = misc_register(&mdev);
-
 	if (ret < 0) {
-		printk(KERN_ALERT MODULE_NAME_LOG "Registering char device failed\n");
-		return ret;
+		printk(KERN_ALERT MODULE_NAME_LOG "Registering misc device failed\n");
+		goto fail_mdev;
 	}
-	printk(KERN_DEBUG MODULE_NAME_LOG "Device registered successfully\n");
 
 	ret = rhashtable_init(&worker_threads, &worker_thread_table_params);
 	if (ret < 0) {
 		printk(KERN_ALERT MODULE_NAME_LOG "Creating worker thread table failed\n");
-		return ret;
+		goto fail_worker_threads;
 	}
-	printk(KERN_DEBUG MODULE_NAME_LOG
-				 "Worker thread table created successfully\n");
 
 	ret = rhashtable_init(&scheduler_threads, &scheduler_thread_table_params);
 	if (ret < 0) {
 		printk(KERN_ALERT MODULE_NAME_LOG
 					 "Creating scheduler thread table failed\n");
-		return ret;
+		goto fail_scheduler_threads;
 	}
-	printk(KERN_DEBUG MODULE_NAME_LOG
-				 "Scheduler thread table created successfully\n");
+
+	printk(KERN_DEBUG MODULE_NAME_LOG "Module intialized successfully\n");
 
 	return SUCCESS;
+
+fail_scheduler_threads:
+	rhashtable_destroy(&scheduler_threads);
+fail_worker_threads:
+	rhashtable_destroy(&worker_threads);
+fail_mdev:
+	misc_deregister(&mdev);
+
+	return ret;
 }
 
 void cleanup_module(void)
 {
 	rhashtable_destroy(&scheduler_threads);
 	rhashtable_destroy(&worker_threads);
-
 	misc_deregister(&mdev);
 
-	printk(KERN_DEBUG MODULE_NAME_LOG "exit\n");
+	printk(KERN_DEBUG MODULE_NAME_LOG "Module unregistered\n");
 }
 
 int __register_worker_thread(pid_t id)
