@@ -1,14 +1,13 @@
+#define _GNU_SOURCE 
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/sysinfo.h>
 
 #include "../library/ums.h"
-
-#define NUM_WORKER_THREADS 6
-#define NUM_SCHEDULER_THREADS 3
 
 pthread_key_t ready_queue_key;
 
@@ -128,6 +127,10 @@ int main(int argc, char *argv[])
 	int ret;
 	int exitvalue = EXIT_SUCCESS;
 
+	int num_cpu = get_nprocs();
+	int num_schedulers = num_cpu;
+	int num_workers = num_cpu * 2;
+
 	ums_completion_list_t *list_1 = create_ums_completion_list();
 	if (list_1 == NULL) {
 		perror("Error while creating completion list");
@@ -139,9 +142,9 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	ums_t worker_threads[NUM_WORKER_THREADS];
+	ums_t worker_threads[num_workers];
 
-	for (int i = 0; i < NUM_WORKER_THREADS; i++) {
+	for (int i = 0; i < num_workers; i++) {
 		ret = create_ums_thread(&worker_threads[i], worker_thread_routine, NULL);
 		if (ret < 0) {
 			perror("Error while creating worker thread");
@@ -173,15 +176,27 @@ int main(int argc, char *argv[])
 	while (pthread_key_create(&ready_queue_key, NULL) == EAGAIN) {
 	}
 
-	pthread_t scheduler_threads[NUM_SCHEDULER_THREADS];
-	for (int i = 0; i < NUM_SCHEDULER_THREADS; i++) {
+	pthread_attr_t attr;
+	pthread_t scheduler_threads[num_schedulers];
+	cpu_set_t cpus;
+	pthread_attr_init(&attr);
+	for (int i = 0; i < num_schedulers; i++) {
 		ums_completion_list_t *list = list_1;
 
 		if (i % 2) {
 			list = list_2;
 		}
 
-		ret = pthread_create(&scheduler_threads[i], NULL, scheduler_thread_routine,
+		CPU_ZERO(&cpus);
+		CPU_SET(i, &cpus);
+		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		if (ret != 0) {
+			errno = ret;
+			perror("Error while setting scheduler thread CPU affinity");
+			exit(EXIT_FAILURE);
+		}
+
+		ret = pthread_create(&scheduler_threads[i], &attr, scheduler_thread_routine,
 												 (void *)list);
 		if (ret != 0) {
 			errno = ret;
@@ -190,7 +205,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	for (int i = 0; i < NUM_SCHEDULER_THREADS; i++) {
+	for (int i = 0; i < num_schedulers; i++) {
 		void *ptr;
 		ret = pthread_join(scheduler_threads[i], &ptr);
 		if (ret != 0) {
