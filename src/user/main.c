@@ -1,4 +1,4 @@
-#define _GNU_SOURCE 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -42,7 +42,7 @@ void scheduler_entrypoint()
 		}
 	}
 
-	while (ready_queue->size > 0) {
+	if (ready_queue->size > 0) {
 		pid_t thread = dequeue_ready_queue(ready_queue);
 		if (thread < 0) {
 			perror("Error while dequeueing worker thread from ready queue");
@@ -204,6 +204,7 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 	}
+	pthread_attr_destroy(&attr);
 
 	for (int i = 0; i < num_schedulers; i++) {
 		void *ptr;
