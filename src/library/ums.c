@@ -5,9 +5,20 @@
 #include <pthread.h>
 #include <errno.h>
 #include <stdio.h>
+#include <semaphore.h>
 
 #include "../kernel/ums_interface.h"
 #include "ums.h"
+
+struct worker_args {
+	void *(*start_routine)(void *);
+	void *arg;
+	ums_t *thread;
+	sem_t sem;
+};
+
+pthread_key_t exit_key;
+pthread_once_t exit_key_once = PTHREAD_ONCE_INIT;
 
 pthread_key_t entrypoint_key;
 pthread_once_t entrypoint_key_once = PTHREAD_ONCE_INIT;
@@ -15,36 +26,108 @@ pthread_once_t entrypoint_key_once = PTHREAD_ONCE_INIT;
 int ums_syscall(unsigned int req_num, void *data)
 {
 	int fd = open("/dev/" DEVICE_NAME, 0);
-	if (fd == -1) {
+	if (fd < 0) {
+		/* The module is not loaded */
+		errno = ENOSYS;
 		return -1;
 	}
 
 	int ret = ioctl(fd, req_num, data);
-
+	int err = errno;
 	close(fd);
+	errno = err;
 
 	return ret;
 }
 
-int register_worker_thread()
+void worker_thread_destructor(void *ptr)
 {
-	return ums_syscall(REGISTER_WORKER_THREAD, NULL);
+	struct worker_args *args = (struct worker_args *)ptr;
+
+	if (args->thread->pid > 0) {
+		ums_syscall(WORKER_THREAD_TERMINATED, 0);
+		sem_destroy(&args->sem);
+		free(args);
+	}
 }
 
-int worker_wait_for_scheduler()
+void create_exit_key()
 {
-	return ums_syscall(WORKER_WAIT_FOR_SCHEDULER, NULL);
+	while (pthread_key_create(&exit_key, worker_thread_destructor) == EAGAIN)
+		continue;
 }
 
-int worker_thread_terminated()
+void *worker_thread_start_routine(void *ptr)
 {
-	return ums_syscall(WORKER_THREAD_TERMINATED, NULL);
+	int ret;
+	struct worker_args *args = (struct worker_args *)ptr;
+
+	pthread_once(&exit_key_once, create_exit_key);
+
+	ret = pthread_setspecific(exit_key, args);
+	if (ret != 0) {
+		args->thread->pid = -ENOMEM;
+		sem_post(&args->sem);
+		return NULL;
+	}
+
+	args->thread->pid = ums_syscall(REGISTER_WORKER_THREAD, NULL);
+	if (args->thread->pid < 0) {
+		/* ENOSYS if the module is not loaded or errors from the module */
+		args->thread->pid = -errno;
+		sem_post(&args->sem);
+		return NULL;
+	}
+
+	sem_post(&args->sem);
+
+	/* Assuming the module has not been unloaded it cannot fail */
+	ums_syscall(WORKER_WAIT_FOR_SCHEDULER, NULL);
+
+	return args->start_routine(args->arg);
+}
+
+int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
+{
+	struct worker_args *args =
+		(struct worker_args *)malloc(sizeof(struct worker_args));
+	if (args == NULL)
+		return -1;
+
+	args->start_routine = start_routine;
+	args->arg = arg;
+	args->thread = thread;
+
+	sem_init(&args->sem, 0, 0);
+
+	int ret = pthread_create(&thread->pthread_id, NULL,
+													 worker_thread_start_routine, (void *)args);
+	if (ret != 0) {
+		sem_destroy(&args->sem);
+		free(args);
+		errno = ret;
+		return -1;
+	}
+
+	while (sem_wait(&args->sem) && errno == EINTR)
+		continue;
+
+	if (thread->pid < 0) {
+		/* ENOSYS if the module is not loaded or errors from the module */
+		sem_destroy(&args->sem);
+		free(args);
+		pthread_join(thread->pthread_id, NULL);
+		errno = -thread->pid;
+		return -1;
+	}
+
+	return 0;
 }
 
 void create_entrypoint_key()
 {
-	while (pthread_key_create(&entrypoint_key, NULL) == EAGAIN) {
-	}
+	while (pthread_key_create(&entrypoint_key, NULL) == EAGAIN)
+		continue;
 }
 
 int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
@@ -52,11 +135,19 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
 {
 	int ret;
 
+	if (scheduler_entrypoint == NULL || ums_completion_list == NULL ||
+			ums_completion_list->size == 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	pthread_once(&entrypoint_key_once, create_entrypoint_key);
 
 	ret = pthread_setspecific(entrypoint_key, scheduler_entrypoint);
-	if (ret != 0)
+	if (ret != 0) {
+		errno = ENOMEM;
 		return -1;
+	}
 
 	pid_t workers[ums_completion_list->size];
 
@@ -73,14 +164,16 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
 	}
 
 	ret = ums_syscall(REGISTER_SCHEDULER_THREAD, &list);
-	if (ret < 0)
-		return ret;
+	if (ret < 0) {
+		/* ENOSYS if the module is not loaded or errors from the module */
+		return -1;
+	}
 
 	scheduler_entrypoint();
 
-	ret = ums_syscall(SCHEDULER_THREAD_TERMINATED, NULL);
-	if (ret < 0)
-		return ret;
+	/* Does only cleanup. Not returning errors to caller because even if it
+	 * fails the call to "enter_ums_scheduling_mode" was successfull */
+	ums_syscall(SCHEDULER_THREAD_TERMINATED, NULL);
 
 	return 0;
 }
@@ -89,7 +182,6 @@ ums_completion_list_t *create_ums_completion_list()
 {
 	ums_completion_list_t *ums_completion_list =
 		(ums_completion_list_t *)malloc(sizeof(ums_completion_list_t));
-
 	if (ums_completion_list == NULL)
 		return NULL;
 
@@ -102,24 +194,36 @@ ums_completion_list_t *create_ums_completion_list()
 
 void delete_ums_completion_list(ums_completion_list_t *ums_completion_list)
 {
-	while (ums_completion_list->head != NULL) {
-		ums_list_node_t *to_be_deleted = ums_completion_list->head;
-		ums_completion_list->head = to_be_deleted->next;
-		free(to_be_deleted);
-	}
+	if (ums_completion_list != NULL) {
+		while (ums_completion_list->head != NULL) {
+			ums_list_node_t *to_be_deleted = ums_completion_list->head;
+			ums_completion_list->head = to_be_deleted->next;
+			free(to_be_deleted);
+		}
 
-	free(ums_completion_list);
+		free(ums_completion_list);
+	}
 }
 
 int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
-																		 pid_t thread)
+																		 ums_t thread)
 {
+	if (ums_completion_list == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (thread.pid < 0) {
+		errno = ESRCH;
+		return -1;
+	}
+
 	ums_list_node_t *new_node =
 		(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
 	if (new_node == NULL)
 		return -1;
 
-	new_node->thread = thread;
+	new_node->thread = thread.pid;
 	new_node->next = NULL;
 
 	if (ums_completion_list->size == 0) {
@@ -136,18 +240,20 @@ int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
 
 int execute_ums_thread(pid_t thread)
 {
-	int ret = ums_syscall(EXECUTE_UMS_THREAD, &thread);
-
-	if (ret < 0) {
-		/* error, thread not executed */
+	if (thread < 0) {
+		errno = ESRCH;
 		return -1;
 	}
 
+	int ret = ums_syscall(EXECUTE_UMS_THREAD, &thread);
+	if (ret < 0) {
+		/* Error, thread not executed. */
+		return -1;
+	}
+
+	/* Not checking errors because it should not fail */
 	scheduler_entrypoint_t scheduler_entrypoint =
 		(scheduler_entrypoint_t)pthread_getspecific(entrypoint_key);
-	if (scheduler_entrypoint == NULL) {
-		return -1;
-	}
 
 	scheduler_entrypoint();
 
@@ -156,26 +262,47 @@ int execute_ums_thread(pid_t thread)
 
 int dequeue_ums_completion_list_items(ums_list_node_t **list)
 {
-	int size = ums_syscall(DEQUEUE_UMS_COMPLETION_LIST_ITEMS, NULL);
-	if (size < 0)
+	if (list == NULL) {
+		errno = EINVAL;
 		return -1;
+	}
+
+	int size = ums_syscall(DEQUEUE_UMS_COMPLETION_LIST_ITEMS, NULL);
+	if (size < 0) {
+		/* ENOSYS if the module is not loaded or errors from the module */
+		return -1;
+	}
 
 	if (size == 0) {
+		/* All workers terminated */
 		return 0;
 	}
 
-	pid_t *dequeued_list = malloc(sizeof(pid_t) * size);
+	pid_t *dequeued_list = (pid_t *)malloc(sizeof(pid_t) * size);
+	if (dequeued_list == NULL)
+		return -1;
 
 	int ret = ums_syscall(GET_DEQUEUED_ITEMS, dequeued_list);
 	if (ret < 0) {
+		/* ENOSYS if the module is not loaded or errors from the module */
+		ret = errno;
 		free(dequeued_list);
+		errno = ret;
 		return -1;
 	}
 
 	ums_list_node_t *tail = NULL;
-	for (int i = 0; i < size; i++) {
+	int i;
+	int err = 0;
+	*list = NULL;
+
+	for (i = 0; i < size; i++) {
 		ums_list_node_t *new_node =
 			(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
+		if (new_node == NULL) {
+			err = 1;
+			break;
+		}
 
 		new_node->thread = dequeued_list[i];
 		new_node->next = NULL;
@@ -191,11 +318,26 @@ int dequeue_ums_completion_list_items(ums_list_node_t **list)
 
 	free(dequeued_list);
 
-	return 1;
+	if (err) {
+		/* Freeing already allocated memory if one allocation failed */
+		while (*list != NULL) {
+			ums_list_node_t *node = (*list)->next;
+			free(*list);
+			*list = node;
+		}
+		errno = ENOMEM;
+		return -1;
+	}
+
+	/* Returning the number of thread dequeued */
+	return i;
 }
 
 ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread)
 {
+	if (ums_thread == NULL)
+		return NULL;
+
 	ums_list_node_t *next = ums_thread->next;
 	free(ums_thread);
 	return next;
@@ -209,7 +351,6 @@ int ums_thread_yield()
 ready_queue_t *create_ready_queue()
 {
 	ready_queue_t *ready_queue = (ready_queue_t *)malloc(sizeof(ready_queue_t));
-
 	if (ready_queue == NULL)
 		return NULL;
 
@@ -220,25 +361,34 @@ ready_queue_t *create_ready_queue()
 	return ready_queue;
 }
 
-void delete_ready_queue(ready_queue_t *ready_queue)
+int delete_ready_queue(ready_queue_t *ready_queue)
 {
-	while (ready_queue->head != NULL) {
-		ums_list_node_t *to_be_deleted = ready_queue->head;
-		ready_queue->head = to_be_deleted->next;
-		free(to_be_deleted);
+	if (ready_queue == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (ready_queue->size > 0) {
+		errno = ENOTEMPTY;
+		return -1;
 	}
 
 	free(ready_queue);
 }
 
-int enqueue_ready_queue(ready_queue_t *ready_queue, pid_t thread)
+int enqueue_ready_queue(ready_queue_t *ready_queue, ums_list_node_t *thread)
 {
+	if (ready_queue == NULL || thread == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	ums_list_node_t *new_node =
 		(ums_list_node_t *)malloc(sizeof(ums_list_node_t));
 	if (new_node == NULL)
 		return -1;
 
-	new_node->thread = thread;
+	new_node->thread = thread->thread;
 	new_node->next = NULL;
 
 	if (ready_queue->size == 0) {
@@ -255,8 +405,10 @@ int enqueue_ready_queue(ready_queue_t *ready_queue, pid_t thread)
 
 pid_t dequeue_ready_queue(ready_queue_t *ready_queue)
 {
-	if (ready_queue->size == 0)
+	if (ready_queue == NULL || ready_queue->size == 0) {
+		errno = EINVAL;
 		return -1;
+	}
 
 	pid_t thread = ready_queue->head->thread;
 	ums_list_node_t *next = ready_queue->head->next;
