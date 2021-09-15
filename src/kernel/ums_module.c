@@ -57,6 +57,11 @@ static struct proc_ops scheduler_fops = { .proc_open = scheduler_open,
 																					.proc_read = seq_read,
 																					.proc_release = single_release };
 
+static int worker_open(struct inode *inode, struct file *file);
+static struct proc_ops worker_fops = { .proc_open = worker_open,
+																			 .proc_read = seq_read,
+																			 .proc_release = single_release };
+
 int init_module(void)
 {
 	int ret;
@@ -151,6 +156,43 @@ static int scheduler_open(struct inode *inode, struct file *file)
 	return single_open(file, scheduler_show, PDE_DATA(inode));
 }
 
+static int worker_show(struct seq_file *m, void *v)
+{
+	struct worker_thread *worker;
+	int *id = m->private;
+
+	seq_printf(m, "Pid:\t %d\n", *id);
+
+	down_read(&worker_lock);
+
+	worker =
+		rhashtable_lookup_fast(&worker_threads, id, worker_thread_table_params);
+	if (worker != NULL) {
+		spin_lock(&worker->lock);
+
+		if (worker->state == UMS_RUNNING) {
+			seq_printf(m, "State:\t Running\n");
+			seq_printf(m, "Scheduler:\t %d\n", worker->scheduler);
+		} else {
+			seq_printf(m, "State:\t Idle\n");
+		}
+		seq_printf(m, "Number of switches:\t %d\n", worker->switch_num);
+
+		spin_unlock(&worker->lock);
+	} else {
+		seq_printf(m, "State:\t Terminated\n");
+	}
+
+	up_read(&worker_lock);
+
+	return SUCCESS;
+}
+
+static int worker_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, worker_show, PDE_DATA(inode));
+}
+
 struct process_proc_dir *create_process_proc_dir(pid_t pid)
 {
 	int ret;
@@ -219,7 +261,8 @@ int __register_worker_thread(pid_t id)
 	worker->id = id;
 	worker->scheduler = -1;
 	worker->state = UMS_NEW;
-	mutex_init(&worker->lock);
+	worker->switch_num = 0;
+	spin_lock_init(&worker->lock);
 
 	down_write(&worker_lock);
 	ret = rhashtable_lookup_insert_fast(&worker_threads, &worker->node,
@@ -258,12 +301,18 @@ int __worker_thread_terminated(pid_t id)
 		return -ENOENT;
 	}
 
-	mutex_lock(&worker->lock);
+	spin_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_DEAD;
-	mutex_unlock(&worker->lock);
+	spin_unlock(&worker->lock);
 
 	up_read(&worker_lock);
+
+	down_write(&worker_lock);
+	rhashtable_remove_fast(&worker_threads, &worker->node,
+												 worker_thread_table_params);
+	kfree(worker);
+	up_write(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n", id,
 				 worker->scheduler);
@@ -338,7 +387,7 @@ int __register_scheduler_thread(pid_t scheduler_id, pid_t process_id,
 	sprintf(index, "%d", process_dir->num_schedulers++);
 	scheduler->dir = proc_mkdir(index, process_dir->schedulers_dir);
 	if (scheduler->dir == NULL) {
- 		ret = -ENOMEM;
+		ret = -ENOMEM;
 		goto fail_dir;
 	}
 	mutex_unlock(&proc_directory_lock);
@@ -350,6 +399,23 @@ int __register_scheduler_thread(pid_t scheduler_id, pid_t process_id,
 		goto fail_scheduler_info;
 	}
 
+	/* Creating workers directory */
+	scheduler->workers_dir = proc_mkdir("workers", scheduler->dir);
+	if (scheduler->workers_dir == NULL) {
+		ret = -ENOMEM;
+		goto fail_workers_dir;
+	}
+
+	/* Creating workers info files */
+	for (i = 0; i < scheduler->num_workers; i++) {
+		sprintf(index, "%d", i);
+		if (!proc_create_data(index, 0, scheduler->workers_dir, &worker_fops,
+													&scheduler->completion_list[i])) {
+			ret = -ENOMEM;
+			goto fail_worker_info;
+		}
+	}
+
 	/* Inserting scheduler in the table */
 	ret = rhashtable_lookup_insert_fast(&scheduler_threads, &scheduler->node,
 																			scheduler_thread_table_params);
@@ -359,6 +425,13 @@ int __register_scheduler_thread(pid_t scheduler_id, pid_t process_id,
 	return SUCCESS;
 
 fail_insert:
+fail_worker_info:
+	while (i > 0) {
+		sprintf(index, "%d", --i);
+		remove_proc_entry(index, scheduler->workers_dir);
+	}
+	proc_remove(scheduler->workers_dir);
+fail_workers_dir:
 	remove_proc_entry("info", scheduler->dir);
 fail_scheduler_info:
 	mutex_lock(&proc_directory_lock);
@@ -380,6 +453,8 @@ int __scheduler_thread_terminated(pid_t scheduler_id, pid_t process_id)
 {
 	struct scheduler_thread *scheduler;
 	struct process_proc_dir *process_dir;
+	char index[12];
+	int i;
 
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &scheduler_id,
 																		 scheduler_thread_table_params);
@@ -389,6 +464,11 @@ int __scheduler_thread_terminated(pid_t scheduler_id, pid_t process_id)
 	rhashtable_remove_fast(&scheduler_threads, &scheduler->node,
 												 scheduler_thread_table_params);
 
+	for (i = 0; i < scheduler->num_workers; i++) {
+		sprintf(index, "%d", i);
+		remove_proc_entry(index, scheduler->workers_dir);
+	}
+	proc_remove(scheduler->workers_dir);
 	remove_proc_entry("info", scheduler->dir);
 
 	mutex_lock(&proc_directory_lock);
@@ -434,7 +514,7 @@ int __dequeue_ums_completion_list_items(pid_t scheduler_id)
 															 worker_thread_table_params);
 
 			if (worker != NULL) {
-				mutex_lock(&worker->lock);
+				spin_lock(&worker->lock);
 				if (worker->state != UMS_DEAD) {
 					found++;
 					if (worker->scheduler == -1) {
@@ -447,7 +527,7 @@ int __dequeue_ums_completion_list_items(pid_t scheduler_id)
 									 scheduler_id, worker->id);
 					}
 				}
-				mutex_unlock(&worker->lock);
+				spin_unlock(&worker->lock);
 			}
 
 			up_read(&worker_lock);
@@ -487,7 +567,6 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	struct worker_thread *worker;
 	struct scheduler_thread *scheduler;
 	struct task_struct *pcb;
-	int state;
 	int wake = 0;
 
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
@@ -507,10 +586,11 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	printk(KERN_DEBUG MODULE_NAME_LOG "scheduler:%d executing worker:%d\n",
 				 sched_id, worker_id);
 
-	mutex_lock(&worker->lock);
+	spin_lock(&worker->lock);
 	worker->state = UMS_RUNNING;
+	worker->switch_num++;
 	pcb = pid_task(find_vpid(worker->id), PIDTYPE_PID);
-	mutex_unlock(&worker->lock);
+	spin_unlock(&worker->lock);
 
 	up_read(&worker_lock);
 
@@ -532,22 +612,6 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	scheduler->worker = -1;
 	spin_unlock(&scheduler->lock);
 
-	mutex_lock(&worker->lock);
-	state = worker->state;
-	mutex_unlock(&worker->lock);
-
-	if (state == UMS_DEAD) {
-		down_write(&worker_lock);
-		rhashtable_remove_fast(&worker_threads, &worker->node,
-													 worker_thread_table_params);
-		kfree(worker);
-		up_write(&worker_lock);
-	} else {
-		mutex_lock(&worker->lock);
-		worker->scheduler = -1;
-		mutex_unlock(&worker->lock);
-	}
-
 	return SUCCESS;
 }
 
@@ -564,10 +628,11 @@ int __ums_thread_yield(pid_t id)
 	if (worker == NULL)
 		return -ENOENT;
 
-	mutex_lock(&worker->lock);
+	spin_lock(&worker->lock);
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_YIELD;
-	mutex_unlock(&worker->lock);
+	worker->scheduler = -1;
+	spin_unlock(&worker->lock);
 
 	up_read(&worker_lock);
 

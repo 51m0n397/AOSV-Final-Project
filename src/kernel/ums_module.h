@@ -16,9 +16,10 @@
 struct worker_thread {
 	pid_t id;
 	struct rhash_head node;
-	struct mutex lock;
+	spinlock_t lock;
 	pid_t scheduler;
 	int state;
+	int switch_num;
 };
 
 struct scheduler_thread {
@@ -29,6 +30,7 @@ struct scheduler_thread {
 	pid_t *dequeued_items;
 	int num_dequeued_items;
 	struct proc_dir_entry *dir;
+	struct proc_dir_entry *workers_dir;
 	pid_t worker;
 	int switch_num;
 	spinlock_t lock;
