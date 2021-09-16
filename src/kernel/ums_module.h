@@ -20,6 +20,8 @@ struct worker_thread {
 	pid_t scheduler;
 	int state;
 	int switch_num;
+	ktime_t running_time;
+	ktime_t last_switch;
 };
 
 struct scheduler_thread {
@@ -33,6 +35,8 @@ struct scheduler_thread {
 	struct proc_dir_entry *workers_dir;
 	pid_t worker;
 	int switch_num;
+	ktime_t last_switch_time;
+	ktime_t last_switch_start;
 	spinlock_t lock;
 };
 

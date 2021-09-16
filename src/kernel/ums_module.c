@@ -7,11 +7,16 @@
 #include <linux/rwsem.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/ktime.h>
 
 #include "ums_module.h"
 #include "ums_interface.h"
 
 #define MODULE_NAME_LOG "UMS: "
+
+#define NSEC_PER_MIN (60 * NSEC_PER_SEC)
+#define NSEC_PER_HOUR (60 * NSEC_PER_MIN)
+#define NSEC_PER_DAY (24 * NSEC_PER_HOUR)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Simone Bartolini <bartolini.1752197@studenti.uniroma1.it>");
@@ -129,6 +134,7 @@ void cleanup_module(void)
 static int scheduler_show(struct seq_file *m, void *v)
 {
 	int i;
+	s64 time;
 	struct scheduler_thread *scheduler = m->private;
 
 	spin_lock(&scheduler->lock);
@@ -145,6 +151,9 @@ static int scheduler_show(struct seq_file *m, void *v)
 		seq_printf(m, "Worker:\t %d\n", scheduler->worker);
 	}
 	seq_printf(m, "Number of switches:\t %d\n", scheduler->switch_num);
+	time = ktime_to_ns(scheduler->last_switch_time);
+	if (time > 0)
+		seq_printf(m, "Last switch time:\t %lld ns\n", time);
 
 	spin_unlock(&scheduler->lock);
 
@@ -160,6 +169,8 @@ static int worker_show(struct seq_file *m, void *v)
 {
 	struct worker_thread *worker;
 	int *id = m->private;
+	ktime_t time;
+	s64 day, hour, min, sec, ms, us;
 
 	seq_printf(m, "Pid:\t %d\n", *id);
 
@@ -173,10 +184,32 @@ static int worker_show(struct seq_file *m, void *v)
 		if (worker->state == UMS_RUNNING) {
 			seq_printf(m, "State:\t Running\n");
 			seq_printf(m, "Scheduler:\t %d\n", worker->scheduler);
+			time = ktime_add(worker->running_time,
+											 ktime_sub(ktime_get(), worker->last_switch));
 		} else {
 			seq_printf(m, "State:\t Idle\n");
+			time = worker->running_time;
 		}
 		seq_printf(m, "Number of switches:\t %d\n", worker->switch_num);
+
+		day = ktime_divns(time, NSEC_PER_DAY);
+		time = time - day * NSEC_PER_DAY;
+		hour = ktime_divns(time, NSEC_PER_HOUR);
+		time = time - hour * NSEC_PER_HOUR;
+		min = ktime_divns(time, NSEC_PER_MIN);
+		time = time - min * NSEC_PER_MIN;
+		sec = ktime_divns(time, NSEC_PER_SEC);
+		time = time - sec * NSEC_PER_SEC;
+		ms = ktime_divns(time, NSEC_PER_MSEC);
+		time = time - ms * NSEC_PER_MSEC;
+		us = ktime_divns(time, NSEC_PER_USEC);
+		time = time - us * NSEC_PER_USEC;
+
+		seq_printf(m,
+							 "Running time:\t "
+							 "%lld days, %lld hours, %lld minutes, %lld seconds, "
+							 "%lld ms, %lld us, %lld ns\n",
+							 day, hour, min, sec, ms, us, time);
 
 		spin_unlock(&worker->lock);
 	} else {
@@ -253,7 +286,9 @@ void remove_process_proc_dir(struct process_proc_dir *dir)
 int __register_worker_thread(pid_t id, pid_t *user_id)
 {
 	struct worker_thread *worker;
+	struct scheduler_thread *scheduler;
 	int ret;
+	ktime_t now;
 
 	worker = kzalloc(sizeof(struct worker_thread), GFP_KERNEL);
 	if (worker == NULL) {
@@ -265,6 +300,7 @@ int __register_worker_thread(pid_t id, pid_t *user_id)
 	worker->scheduler = -1;
 	worker->state = UMS_NEW;
 	worker->switch_num = 0;
+	worker->running_time = ktime_set(0, 0);
 	spin_lock_init(&worker->lock);
 
 	down_write(&worker_lock);
@@ -282,6 +318,24 @@ int __register_worker_thread(pid_t id, pid_t *user_id)
 
 	set_current_state(TASK_KILLABLE);
 	schedule();
+
+	/* after context switch */
+	now = ktime_get();
+
+	scheduler = rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
+																		 scheduler_thread_table_params);
+
+	if (scheduler != NULL) {
+		spin_lock(&scheduler->lock);
+		scheduler->last_switch_time = ktime_sub(now, scheduler->last_switch_start);
+		printk(KERN_DEBUG MODULE_NAME_LOG "Switched to worker %d in %lld ns\n", id,
+					 ktime_to_ns(scheduler->last_switch_time));
+		spin_unlock(&scheduler->lock);
+	}
+
+	spin_lock(&worker->lock);
+	worker->last_switch = ktime_get();
+	spin_unlock(&worker->lock);
 
 	return SUCCESS;
 
@@ -311,6 +365,9 @@ int __worker_thread_terminated(pid_t id)
 	}
 
 	spin_lock(&worker->lock);
+
+	worker->running_time = ktime_add(worker->running_time,
+																	 ktime_sub(ktime_get(), worker->last_switch));
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_DEAD;
 	spin_unlock(&worker->lock);
@@ -327,7 +384,8 @@ int __worker_thread_terminated(pid_t id)
 				 pcb->pid);
 
 	wake_up_process(pcb);
-	schedule();
+	if (yield_to(pcb, true) == 0)
+		schedule();
 
 	return SUCCESS;
 }
@@ -353,6 +411,7 @@ int __register_scheduler_thread(pid_t scheduler_id, pid_t process_id,
 	scheduler->num_workers = completion_list->size;
 	scheduler->worker = -1;
 	scheduler->switch_num = 0;
+	scheduler->last_switch_time = ktime_set(0, 0);
 	spin_lock_init(&scheduler->lock);
 
 	/* Allocating completion list */
@@ -581,6 +640,7 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	struct worker_thread *worker;
 	struct scheduler_thread *scheduler;
 	struct task_struct *pcb;
+	ktime_t now = ktime_get();
 
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 																		 scheduler_thread_table_params);
@@ -610,15 +670,18 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	spin_lock(&scheduler->lock);
 	scheduler->worker = worker_id;
 	scheduler->switch_num++;
+	scheduler->last_switch_start = now;
 	spin_unlock(&scheduler->lock);
 
 	set_current_state(TASK_KILLABLE);
 	set_cpus_allowed_ptr(pcb, cpu);
 	wake_up_process(pcb);
-	schedule();
+	if (yield_to(pcb, true) == 0)
+		schedule();
 
 	/* after context switch */
-	printk(KERN_DEBUG MODULE_NAME_LOG "Back from switch:%d\n", sched_id);
+	printk(KERN_DEBUG MODULE_NAME_LOG "Scheduler %d back from switch\n",
+				 sched_id);
 
 	spin_lock(&scheduler->lock);
 	scheduler->worker = -1;
@@ -630,16 +693,21 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 int __ums_thread_yield(pid_t id)
 {
 	struct worker_thread *worker;
+	struct scheduler_thread *scheduler;
 	struct task_struct *pcb;
+	ktime_t now;
 
 	down_read(&worker_lock);
+
 	worker =
 		rhashtable_lookup_fast(&worker_threads, &id, worker_thread_table_params);
-
 	if (worker == NULL)
 		return -ENOENT;
 
 	spin_lock(&worker->lock);
+
+	worker->running_time = ktime_add(worker->running_time,
+																	 ktime_sub(ktime_get(), worker->last_switch));
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_YIELD;
 	worker->scheduler = -1;
@@ -647,13 +715,33 @@ int __ums_thread_yield(pid_t id)
 	set_current_state(TASK_KILLABLE);
 
 	spin_unlock(&worker->lock);
+
 	up_read(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n", id,
 				 pcb->pid);
 
 	wake_up_process(pcb);
-	schedule();
+	if (yield_to(pcb, true) == 0)
+		schedule();
+
+	/* after context switch */
+	now = ktime_get();
+
+	scheduler = rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
+																		 scheduler_thread_table_params);
+
+	if (scheduler != NULL) {
+		spin_lock(&scheduler->lock);
+		scheduler->last_switch_time = ktime_sub(now, scheduler->last_switch_start);
+		printk(KERN_DEBUG MODULE_NAME_LOG "Switched to worker %d in %lld ns\n", id,
+					 ktime_to_ns(scheduler->last_switch_time));
+		spin_unlock(&scheduler->lock);
+	}
+
+	spin_lock(&worker->lock);
+	worker->last_switch = ktime_get();
+	spin_unlock(&worker->lock);
 
 	return SUCCESS;
 }
