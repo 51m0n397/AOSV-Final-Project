@@ -40,6 +40,7 @@ struct process_proc_dir {
 	pid_t id;
 	struct rhash_head node;
 	int num_schedulers;
+	int last_sched_id;
 	struct proc_dir_entry *pid_dir;
 	struct proc_dir_entry *schedulers_dir;
 };

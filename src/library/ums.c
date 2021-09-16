@@ -14,7 +14,6 @@ struct worker_args {
 	void *(*start_routine)(void *);
 	void *arg;
 	ums_t *thread;
-	sem_t sem;
 };
 
 pthread_key_t exit_key;
@@ -46,7 +45,6 @@ void worker_thread_destructor(void *ptr)
 
 	if (args->thread->pid > 0) {
 		ums_syscall(WORKER_THREAD_TERMINATED, 0);
-		sem_destroy(&args->sem);
 		free(args);
 	}
 }
@@ -67,22 +65,15 @@ void *worker_thread_start_routine(void *ptr)
 	ret = pthread_setspecific(exit_key, args);
 	if (ret != 0) {
 		args->thread->pid = -ENOMEM;
-		sem_post(&args->sem);
 		return NULL;
 	}
 
-	args->thread->pid = ums_syscall(REGISTER_WORKER_THREAD, NULL);
-	if (args->thread->pid < 0) {
+	ret = ums_syscall(REGISTER_WORKER_THREAD, &args->thread->pid);
+	if (ret < 0) {
 		/* ENOSYS if the module is not loaded or errors from the module */
 		args->thread->pid = -errno;
-		sem_post(&args->sem);
 		return NULL;
 	}
-
-	sem_post(&args->sem);
-
-	/* Assuming the module has not been unloaded it cannot fail */
-	ums_syscall(WORKER_WAIT_FOR_SCHEDULER, NULL);
 
 	return args->start_routine(args->arg);
 }
@@ -97,24 +88,21 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 	args->start_routine = start_routine;
 	args->arg = arg;
 	args->thread = thread;
-
-	sem_init(&args->sem, 0, 0);
+	thread->pid = 0;
 
 	int ret = pthread_create(&thread->pthread_id, NULL,
 													 worker_thread_start_routine, (void *)args);
 	if (ret != 0) {
-		sem_destroy(&args->sem);
 		free(args);
 		errno = ret;
 		return -1;
 	}
 
-	while (sem_wait(&args->sem) && errno == EINTR)
+	while (thread->pid == 0)
 		continue;
 
 	if (thread->pid < 0) {
 		/* ENOSYS if the module is not loaded or errors from the module */
-		sem_destroy(&args->sem);
 		free(args);
 		pthread_join(thread->pthread_id, NULL);
 		errno = -thread->pid;

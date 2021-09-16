@@ -207,6 +207,7 @@ struct process_proc_dir *create_process_proc_dir(pid_t pid)
 
 	dir->id = pid;
 	dir->num_schedulers = 0;
+	dir->last_sched_id = 0;
 
 	sprintf(id, "%d", pid);
 	dir->pid_dir = proc_mkdir(id, ums_dir);
@@ -249,14 +250,16 @@ void remove_process_proc_dir(struct process_proc_dir *dir)
 	kfree(dir);
 }
 
-int __register_worker_thread(pid_t id)
+int __register_worker_thread(pid_t id, pid_t *user_id)
 {
 	struct worker_thread *worker;
 	int ret;
 
 	worker = kzalloc(sizeof(struct worker_thread), GFP_KERNEL);
-	if (worker == NULL)
-		return -ENOMEM;
+	if (worker == NULL) {
+		ret = -ENOMEM;
+		goto fail_alloc;
+	}
 
 	worker->id = id;
 	worker->scheduler = -1;
@@ -267,29 +270,35 @@ int __register_worker_thread(pid_t id)
 	down_write(&worker_lock);
 	ret = rhashtable_lookup_insert_fast(&worker_threads, &worker->node,
 																			worker_thread_table_params);
-	up_write(&worker_lock);
+	if (ret < 0)
+		goto fail_insert;
 
-	if (ret < 0) {
-		kfree(worker);
-		return ret;
+	if (copy_to_user(user_id, &id, sizeof(pid_t))) {
+		ret = -EFAULT;
+		goto fail_copy;
 	}
 
-	return id;
-}
+	up_write(&worker_lock);
 
-int __worker_wait_for_scheduler(void)
-{
 	set_current_state(TASK_KILLABLE);
 	schedule();
 
 	return SUCCESS;
+
+fail_copy:
+	rhashtable_remove_fast(&worker_threads, &worker->node,
+												 worker_thread_table_params);
+fail_insert:
+	up_write(&worker_lock);
+	kfree(worker);
+fail_alloc:
+	return ret;
 }
 
 int __worker_thread_terminated(pid_t id)
 {
 	struct worker_thread *worker;
 	struct task_struct *pcb;
-	int wake = 0;
 
 	down_read(&worker_lock);
 
@@ -315,11 +324,9 @@ int __worker_thread_terminated(pid_t id)
 	up_write(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n", id,
-				 worker->scheduler);
+				 pcb->pid);
 
-	while (wake != 1) {
-		wake = wake_up_process(pcb);
-	}
+	wake_up_process(pcb);
 	schedule();
 
 	return SUCCESS;
@@ -384,7 +391,8 @@ int __register_scheduler_thread(pid_t scheduler_id, pid_t process_id,
 		goto fail_process_dir;
 	}
 
-	sprintf(index, "%d", process_dir->num_schedulers++);
+	process_dir->num_schedulers++;
+	sprintf(index, "%d", process_dir->last_sched_id++);
 	scheduler->dir = proc_mkdir(index, process_dir->schedulers_dir);
 	if (scheduler->dir == NULL) {
 		ret = -ENOMEM;
@@ -437,6 +445,7 @@ fail_scheduler_info:
 	mutex_lock(&proc_directory_lock);
 	proc_remove(scheduler->dir);
 fail_dir:
+	process_dir->last_sched_id--;
 	if (--process_dir->num_schedulers == 0)
 		remove_process_proc_dir(process_dir);
 fail_process_dir:
@@ -538,6 +547,11 @@ int __dequeue_ums_completion_list_items(pid_t scheduler_id)
 			kfree(scheduler->dequeued_items);
 			break;
 		}
+
+		if (fatal_signal_pending(current)) {
+			kfree(scheduler->dequeued_items);
+			return -EINTR;
+		}
 	}
 
 	return scheduler->num_dequeued_items;
@@ -567,7 +581,6 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	struct worker_thread *worker;
 	struct scheduler_thread *scheduler;
 	struct task_struct *pcb;
-	int wake = 0;
 
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 																		 scheduler_thread_table_params);
@@ -599,10 +612,8 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	scheduler->switch_num++;
 	spin_unlock(&scheduler->lock);
 
-	while (wake != 1) {
-		wake = wake_up_process(pcb);
-	}
 	set_current_state(TASK_KILLABLE);
+	wake_up_process(pcb);
 	schedule();
 
 	/* after context switch */
@@ -619,7 +630,6 @@ int __ums_thread_yield(pid_t id)
 {
 	struct worker_thread *worker;
 	struct task_struct *pcb;
-	int wake = 0;
 
 	down_read(&worker_lock);
 	worker =
@@ -632,18 +642,16 @@ int __ums_thread_yield(pid_t id)
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_YIELD;
 	worker->scheduler = -1;
-	spin_unlock(&worker->lock);
+	
+	set_current_state(TASK_KILLABLE);
 
+	spin_unlock(&worker->lock);
 	up_read(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n", id,
-				 worker->scheduler);
+				 pcb->pid);
 
-	while (wake != 1) {
-		wake = wake_up_process(pcb);
-	}
-
-	set_current_state(TASK_KILLABLE);
+	wake_up_process(pcb);
 	schedule();
 
 	return SUCCESS;
@@ -660,13 +668,7 @@ static long device_ioctl(struct file *file, unsigned int request,
 		printk(KERN_DEBUG MODULE_NAME_LOG "REGISTER_WORKER_THREAD pid:%d\n",
 					 current->pid);
 
-		return __register_worker_thread(current->pid);
-
-	case WORKER_WAIT_FOR_SCHEDULER:
-		printk(KERN_DEBUG MODULE_NAME_LOG "WORKER_WAIT_FOR_SCHEDULER pid:%d\n",
-					 current->pid);
-
-		return __worker_wait_for_scheduler();
+		return __register_worker_thread(current->pid, (pid_t *)data);
 
 	case WORKER_THREAD_TERMINATED:
 		printk(KERN_DEBUG MODULE_NAME_LOG "WORKER_THREAD_TERMINATED pid:%d\n",
