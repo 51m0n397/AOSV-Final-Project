@@ -576,7 +576,7 @@ int __get_dequeued_items(pid_t scheduler_id, pid_t *output_list)
 	return SUCCESS;
 }
 
-int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
+int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 {
 	struct worker_thread *worker;
 	struct scheduler_thread *scheduler;
@@ -613,6 +613,7 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id)
 	spin_unlock(&scheduler->lock);
 
 	set_current_state(TASK_KILLABLE);
+	set_cpus_allowed_ptr(pcb, cpu);
 	wake_up_process(pcb);
 	schedule();
 
@@ -642,7 +643,7 @@ int __ums_thread_yield(pid_t id)
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
 	worker->state = UMS_YIELD;
 	worker->scheduler = -1;
-	
+
 	set_current_state(TASK_KILLABLE);
 
 	spin_unlock(&worker->lock);
@@ -712,7 +713,7 @@ static long device_ioctl(struct file *file, unsigned int request,
 		if (copy_from_user(&pid, (pid_t *)data, sizeof(pid_t)))
 			return -EFAULT;
 
-		return __execute_ums_thread(current->pid, pid);
+		return __execute_ums_thread(current->pid, pid, current->cpus_ptr);
 
 	case UMS_THREAD_YIELD:
 		printk(KERN_DEBUG MODULE_NAME_LOG "UMS_THREAD_YIELD pid:%d\n",
