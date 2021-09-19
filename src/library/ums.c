@@ -1,19 +1,14 @@
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <errno.h>
-#include <stdio.h>
-#include <semaphore.h>
 
 #include "../kernel/ums_interface.h"
 #include "ums.h"
 
+/* Struct used to pass arguments to a worker thread */
 struct worker_args {
-	void *(*start_routine)(void *);
-	void *arg;
-	ums_t *thread;
+	void *(*start_routine)(void *); /* The routine the worker should execute */
+	void *arg;											/* The argument for start_routine */
+	ums_t *thread; 									/* The struct representing the worker thread */
 };
 
 pthread_key_t exit_key;
@@ -21,23 +16,6 @@ pthread_once_t exit_key_once = PTHREAD_ONCE_INIT;
 
 pthread_key_t entrypoint_key;
 pthread_once_t entrypoint_key_once = PTHREAD_ONCE_INIT;
-
-int ums_syscall(unsigned int req_num, void *data)
-{
-	int fd = open("/dev/" DEVICE_NAME, 0);
-	if (fd < 0) {
-		/* The module is not loaded */
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int ret = ioctl(fd, req_num, data);
-	int err = errno;
-	close(fd);
-	errno = err;
-
-	return ret;
-}
 
 void worker_thread_destructor(void *ptr)
 {
@@ -60,21 +38,32 @@ void *worker_thread_start_routine(void *ptr)
 	int ret;
 	struct worker_args *args = (struct worker_args *)ptr;
 
+	/** 
+	 * We set exit_key to args. This is a trick to make it so that the key 
+	 * destructor worker_thread_destructor is executed when the worker terminates.
+	 * worker_thread_destructor will execute the WORKER_THREAD_TERMINATED syscall
+	 * to notify the ums module of the worker termination
+	 */
 	pthread_once(&exit_key_once, create_exit_key);
-
 	ret = pthread_setspecific(exit_key, args);
 	if (ret != 0) {
 		args->thread->pid = -ENOMEM;
 		return NULL;
 	}
 
+	/**
+	 * Registering the worker thread. If successful the thread wiil be blocked
+	 * until it is scheduler by a ums scheduler. The syscall will also put the
+	 * worker pid in args->thread->pid, notifing the parent thread of the 
+	 * succesful creation of the worker
+	 */
 	ret = ums_syscall(REGISTER_WORKER_THREAD, &args->thread->pid);
 	if (ret < 0) {
-		/* ENOSYS if the module is not loaded or errors from the module */
 		args->thread->pid = -errno;
 		return NULL;
 	}
 
+	/* Executing the thread start_routine passed by the user */
 	return args->start_routine(args->arg);
 }
 
@@ -90,6 +79,7 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 	args->thread = thread;
 	thread->pid = 0;
 
+	/* Creating the worker thread */
 	int ret = pthread_create(&thread->pthread_id, NULL,
 													 worker_thread_start_routine, (void *)args);
 	if (ret != 0) {
@@ -98,11 +88,20 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 		return -1;
 	}
 
+	/**
+	 * Waiting for the worker thread to set thread->pid to its pid, signaling
+	 * a successful creation
+	 */
 	while (thread->pid == 0)
 		continue;
 
+	/**
+	 *  If thread->pid is less then zero it means that the worker thread 
+	 * 	encoutered an error during initialization and set thread->pid to the
+	 * 	error code negated. We then join the thread and return the error to 
+	 * 	the caller
+	 */
 	if (thread->pid < 0) {
-		/* ENOSYS if the module is not loaded or errors from the module */
 		free(args);
 		pthread_join(thread->pthread_id, NULL);
 		errno = -thread->pid;
@@ -118,32 +117,36 @@ void create_entrypoint_key()
 		continue;
 }
 
-int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
-															ums_completion_list_t *ums_completion_list)
+int enter_ums_scheduling_mode(scheduler_entrypoint_t entrypoint,
+															ums_completion_list_t *completion_list)
 {
 	int ret;
 
-	if (scheduler_entrypoint == NULL || ums_completion_list == NULL ||
-			ums_completion_list->size == 0) {
+	if (entrypoint == NULL || completion_list == NULL ||
+			completion_list->size == 0) {
 		errno = EINVAL;
 		return -1;
 	}
 
+	/* Storing the entry point function pointer in the entrypoint_key key */
 	pthread_once(&entrypoint_key_once, create_entrypoint_key);
-
-	ret = pthread_setspecific(entrypoint_key, scheduler_entrypoint);
+	ret = pthread_setspecific(entrypoint_key, entrypoint);
 	if (ret != 0) {
 		errno = ENOMEM;
 		return -1;
 	}
 
-	pid_t workers[ums_completion_list->size];
+	/**
+	 * Filling a thread_list struct with the pids of the workers in the 
+	 * completion list in order to pass the list to the ums module
+	 */
+	pid_t workers[completion_list->size];
 
 	struct thread_list list;
 	list.size = 0;
 	list.threads = workers;
 
-	ums_list_node_t *ptr = ums_completion_list->head;
+	ums_list_node_t *ptr = completion_list->head;
 
 	while (ptr != NULL) {
 		workers[list.size] = ptr->thread;
@@ -151,16 +154,23 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t scheduler_entrypoint,
 		ptr = ptr->next;
 	}
 
+	/* Registering the scheduler */
 	ret = ums_syscall(REGISTER_SCHEDULER_THREAD, &list);
-	if (ret < 0) {
-		/* ENOSYS if the module is not loaded or errors from the module */
+	if (ret < 0)
 		return -1;
-	}
 
-	scheduler_entrypoint();
+	/* 
+	 * Executing the entry point function to select the first worker to schedule.
+	 * The call is actually recursive: every call to execute_ums_thread inside
+	 * the entry point function will result in another call to the entry point
+	 * when the worker ends or yields. If the entry point has been correctly 
+	 * defined by the user and there are no errors, when this first call to 
+	 * the entry point ends all workers in the completion list should have
+	 * terminated
+	 */
+	entrypoint();
 
-	/* Does only cleanup. Not returning errors to caller because even if it
-	 * fails the call to "enter_ums_scheduling_mode" was successfull */
+	/* Notifing the ums modle of the scheduler termination for cleanup */
 	ums_syscall(SCHEDULER_THREAD_TERMINATED, NULL);
 
 	return 0;
@@ -180,23 +190,23 @@ ums_completion_list_t *create_ums_completion_list()
 	return ums_completion_list;
 }
 
-void delete_ums_completion_list(ums_completion_list_t *ums_completion_list)
+void delete_ums_completion_list(ums_completion_list_t *completion_list)
 {
-	if (ums_completion_list != NULL) {
-		while (ums_completion_list->head != NULL) {
-			ums_list_node_t *to_be_deleted = ums_completion_list->head;
-			ums_completion_list->head = to_be_deleted->next;
+	if (completion_list != NULL) {
+		while (completion_list->head != NULL) {
+			ums_list_node_t *to_be_deleted = completion_list->head;
+			completion_list->head = to_be_deleted->next;
 			free(to_be_deleted);
 		}
 
-		free(ums_completion_list);
+		free(completion_list);
 	}
 }
 
-int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
+int enqueue_ums_completion_list_item(ums_completion_list_t *completion_list,
 																		 ums_t thread)
 {
-	if (ums_completion_list == NULL) {
+	if (completion_list == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -214,14 +224,14 @@ int enqueue_ums_completion_list_item(ums_completion_list_t *ums_completion_list,
 	new_node->thread = thread.pid;
 	new_node->next = NULL;
 
-	if (ums_completion_list->size == 0) {
-		ums_completion_list->head = new_node;
-		ums_completion_list->tail = new_node;
+	if (completion_list->size == 0) {
+		completion_list->head = new_node;
+		completion_list->tail = new_node;
 	} else {
-		ums_completion_list->tail->next = new_node;
-		ums_completion_list->tail = new_node;
+		completion_list->tail->next = new_node;
+		completion_list->tail = new_node;
 	}
-	ums_completion_list->size++;
+	completion_list->size++;
 
 	return 0;
 }
@@ -239,10 +249,17 @@ int execute_ums_thread(pid_t thread)
 		return -1;
 	}
 
-	/* Not checking errors because it should not fail */
+	/**
+	 * Retrieving the entry point function for the scheduler from the 
+	 * entrypoint_key key. If the execution of the worker was successful it
+	 * means that execute_ums_thread was called by a registered scheduler and
+	 * thus entrypoint_key must be set to the pointer of the entry point 
+	 * function
+	 */
 	scheduler_entrypoint_t scheduler_entrypoint =
 		(scheduler_entrypoint_t)pthread_getspecific(entrypoint_key);
 
+	/* Calling the entry point function to select the next worker to be scheduled */
 	scheduler_entrypoint();
 
 	return 0;
@@ -256,23 +273,19 @@ int dequeue_ums_completion_list_items(ums_list_node_t **list)
 	}
 
 	int size = ums_syscall(DEQUEUE_UMS_COMPLETION_LIST_ITEMS, NULL);
-	if (size < 0) {
-		/* ENOSYS if the module is not loaded or errors from the module */
+	if (size < 0)
 		return -1;
-	}
 
-	if (size == 0) {
-		/* All workers terminated */
+	/* All workers terminated */
+	if (size == 0)
 		return 0;
-	}
 
-	pid_t *dequeued_list = (pid_t *)malloc(sizeof(pid_t) * size);
+	pid_t *dequeued_list = (pid_t *)calloc(size, sizeof(pid_t));
 	if (dequeued_list == NULL)
 		return -1;
 
 	int ret = ums_syscall(GET_DEQUEUED_ITEMS, dequeued_list);
 	if (ret < 0) {
-		/* ENOSYS if the module is not loaded or errors from the module */
 		ret = errno;
 		free(dequeued_list);
 		errno = ret;
@@ -321,13 +334,13 @@ int dequeue_ums_completion_list_items(ums_list_node_t **list)
 	return i;
 }
 
-ums_list_node_t *get_next_ums_list_item(ums_list_node_t *ums_thread)
+ums_list_node_t *get_next_ums_list_item(ums_list_node_t *item)
 {
-	if (ums_thread == NULL)
+	if (item == NULL)
 		return NULL;
 
-	ums_list_node_t *next = ums_thread->next;
-	free(ums_thread);
+	ums_list_node_t *next = item->next;
+	free(item);
 	return next;
 }
 
@@ -364,9 +377,9 @@ int delete_ready_queue(ready_queue_t *ready_queue)
 	free(ready_queue);
 }
 
-int enqueue_ready_queue(ready_queue_t *ready_queue, ums_list_node_t *thread)
+int enqueue_ready_queue(ready_queue_t *ready_queue, ums_list_node_t *item)
 {
-	if (ready_queue == NULL || thread == NULL) {
+	if (ready_queue == NULL || item == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -376,7 +389,7 @@ int enqueue_ready_queue(ready_queue_t *ready_queue, ums_list_node_t *thread)
 	if (new_node == NULL)
 		return -1;
 
-	new_node->thread = thread->thread;
+	new_node->thread = item->thread;
 	new_node->next = NULL;
 
 	if (ready_queue->size == 0) {

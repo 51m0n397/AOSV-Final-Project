@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
@@ -9,6 +8,7 @@
 
 #include "../library/ums.h"
 
+/* Thread specific key used to store the ready queue of each scheduler */
 pthread_key_t ready_queue_key;
 
 void scheduler_entrypoint()
@@ -16,6 +16,7 @@ void scheduler_entrypoint()
 	int ret;
 	pid_t pid = syscall(__NR_gettid);
 
+	/* Retrieving the ready queue */
 	ready_queue_t *ready_queue =
 		(ready_queue_t *)pthread_getspecific(ready_queue_key);
 	if (ready_queue == NULL) {
@@ -23,6 +24,10 @@ void scheduler_entrypoint()
 		return;
 	}
 
+	/**
+	 * If the ready queue is empty we dequeue threads from the completion
+	 * list 
+	 */
 	if (ready_queue->size == 0) {
 		ums_list_node_t *available_thread = NULL;
 
@@ -33,15 +38,18 @@ void scheduler_entrypoint()
 		}
 
 		while (available_thread != NULL) {
-			ret = enqueue_ready_queue(ready_queue, available_thread);
+			ret = enqueue_ready_queue(ready_queue,
+						  available_thread);
 			if (ret < 0) {
 				perror("Error while enqueueing worker thread in ready queue");
 				return;
 			}
-			available_thread = get_next_ums_list_item(available_thread);
+			available_thread =
+				get_next_ums_list_item(available_thread);
 		}
 	}
 
+	/* We execute a thread from the ready queue */
 	if (ready_queue->size > 0) {
 		pid_t thread = dequeue_ready_queue(ready_queue);
 		if (thread < 0) {
@@ -69,6 +77,10 @@ void *scheduler_thread_routine(void *ptr)
 	}
 	*retvalue = EXIT_SUCCESS;
 
+	/**
+	 * Each scheduler creates its ready queue and sets it in the
+	 * ready_queue_key key
+	 */
 	ready_queue_t *ready_queue = create_ready_queue();
 	if (ready_queue == NULL) {
 		perror("Error while creating ready queue");
@@ -127,10 +139,14 @@ int main(int argc, char *argv[])
 	int ret;
 	int exitvalue = EXIT_SUCCESS;
 
+	/**
+	 * One scheduler per CPU, the number of workers is double the schedulers
+	 */
 	int num_cpu = get_nprocs();
 	int num_schedulers = num_cpu;
 	int num_workers = num_cpu * 2;
 
+	/* Creating two completion lists */
 	ums_completion_list_t *list_1 = create_ums_completion_list();
 	if (list_1 == NULL) {
 		perror("Error while creating completion list");
@@ -142,10 +158,11 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	/* Creating the workers */
 	ums_t worker_threads[num_workers];
-
 	for (int i = 0; i < num_workers; i++) {
-		ret = create_ums_thread(&worker_threads[i], worker_thread_routine, NULL);
+		ret = create_ums_thread(&worker_threads[i],
+					worker_thread_routine, NULL);
 		if (ret < 0) {
 			perror("Error while creating worker thread");
 			exit(EXIT_FAILURE);
@@ -158,14 +175,18 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		ret = enqueue_ums_completion_list_item(list_1, worker_threads[i]);
+		/* list_1 will contain all workers */
+		ret = enqueue_ums_completion_list_item(list_1,
+						       worker_threads[i]);
 		if (ret < 0) {
 			perror("Error while enqueueing worker thread in completion list");
 			exit(EXIT_FAILURE);
 		}
 
+		/* list_2 will contain only odd workers */
 		if (i % 2) {
-			ret = enqueue_ums_completion_list_item(list_2, worker_threads[i]);
+			ret = enqueue_ums_completion_list_item(
+				list_2, worker_threads[i]);
 			if (ret < 0) {
 				perror("Error while enqueueing worker thread in completion list");
 				exit(EXIT_FAILURE);
@@ -176,28 +197,33 @@ int main(int argc, char *argv[])
 	while (pthread_key_create(&ready_queue_key, NULL) == EAGAIN) {
 	}
 
+	/* Creating the schedulers */
 	pthread_attr_t attr;
 	pthread_t scheduler_threads[num_schedulers];
 	cpu_set_t cpus;
 	pthread_attr_init(&attr);
 	for (int i = 0; i < num_schedulers; i++) {
+		/**
+		 * Even schedulers will use list_1 while odd schedulers list_2
+		 */
 		ums_completion_list_t *list = list_1;
-
 		if (i % 2) {
 			list = list_2;
 		}
 
+		/* Assigning each scheduler to a CPU */
 		CPU_ZERO(&cpus);
 		CPU_SET(i, &cpus);
-		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t),
+						  &cpus);
 		if (ret != 0) {
 			errno = ret;
 			perror("Error while setting scheduler thread CPU affinity");
 			exit(EXIT_FAILURE);
 		}
 
-		ret = pthread_create(&scheduler_threads[i], &attr, scheduler_thread_routine,
-												 (void *)list);
+		ret = pthread_create(&scheduler_threads[i], &attr,
+				     scheduler_thread_routine, (void *)list);
 		if (ret != 0) {
 			errno = ret;
 			perror("Error while creating scheduler thread");
@@ -206,6 +232,7 @@ int main(int argc, char *argv[])
 	}
 	pthread_attr_destroy(&attr);
 
+	/* Joining the schedulers */
 	for (int i = 0; i < num_schedulers; i++) {
 		void *ptr;
 		ret = pthread_join(scheduler_threads[i], &ptr);
@@ -223,6 +250,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* Deleting the completion lists */
 	delete_ums_completion_list(list_1);
 	delete_ums_completion_list(list_2);
 
