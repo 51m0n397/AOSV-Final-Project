@@ -22,10 +22,30 @@
 #define UMS_NEW		0
 #define UMS_RUNNING	1
 #define UMS_YIELD	2
+#define UMS_DEAD	3
 
 /* Used for converting integers to string */
 #define INT_DECIMAL_STRING_SIZE(int_type)                                      \
 	((8 * sizeof(int_type) - 1) * 10 / 33 + 3)
+
+/**
+ * process - a process using the UMS module.
+ * @id: the PID of the process.
+ * @last_sched_dir_name: the name of the directory of the last scheduler created
+ *                       in the process.
+ * @pid_dir: the process proc dir.
+ * @schedulers_dir: the schedulers dir inside @pid_dir.
+ * @schedulers_list: the list of schedulers in the process.
+ */
+struct process {
+	pid_t id;
+	struct rhash_head node;
+	spinlock_t lock;
+	int last_sched_dir_name;
+	struct proc_dir_entry *pid_dir;
+	struct proc_dir_entry *schedulers_dir;
+	struct list_head schedulers_list;
+};
 
 /**
  * worker_thread - a UMS worker thread.
@@ -65,7 +85,8 @@ struct worker_thread {
  */
 struct scheduler_thread {
 	pid_t id;
-	struct rhash_head node;
+	struct rhash_head table_node;
+	struct list_head list_node;
 	spinlock_t lock;
 	pid_t *completion_list;
 	int num_workers;
@@ -79,28 +100,16 @@ struct scheduler_thread {
 	ktime_t last_switch_start;
 };
 
-/**
- * process_proc_dir - the proc dir of a process.
- * @id: the PID of the process.
- * @num_schedulers: the number of currently active schedulers in the process.
- * @last_sched_id: the id of the last scheduler created in the process.
- * @pid_dir: the process proc dir.
- * @schedulers_dir: the schedulers dir inside @pid_dir.
- */
-struct process_proc_dir {
-	pid_t id;
-	struct rhash_head node;
-	int num_schedulers;
-	int last_sched_id;
-	struct proc_dir_entry *pid_dir;
-	struct proc_dir_entry *schedulers_dir;
-};
-
 /* Parameters for the device */
 static long device_ioctl(struct file *file, unsigned int request,
 			 unsigned long data);
+int device_open(struct inode *inode, struct file *file);
+int device_release(struct inode *inode, struct file *file);
+
 static struct file_operations fops = {
 	.unlocked_ioctl = device_ioctl,
+	.open = device_open,
+	.release = device_release,
 };
 
 static struct miscdevice mdev = {
@@ -109,6 +118,13 @@ static struct miscdevice mdev = {
 	.mode = S_IALLUGO,
 	.fops = &fops,
 };
+
+/* Table containing the processes */
+struct rhashtable processes;
+/* Table containing the worker threads */
+struct rhashtable worker_threads;
+/* Table containing the scheduler threads */
+struct rhashtable scheduler_threads;
 
 /* Parameters for the tables */
 const static struct rhashtable_params worker_thread_table_params = {
@@ -120,26 +136,20 @@ const static struct rhashtable_params worker_thread_table_params = {
 const static struct rhashtable_params scheduler_thread_table_params = {
 	.key_len = sizeof(pid_t),
 	.key_offset = offsetof(struct scheduler_thread, id),
-	.head_offset = offsetof(struct scheduler_thread, node),
+	.head_offset = offsetof(struct scheduler_thread, table_node),
 };
 
-const static struct rhashtable_params proc_directiory_table_params = {
+const static struct rhashtable_params process_table_params = {
 	.key_len = sizeof(pid_t),
-	.key_offset = offsetof(struct process_proc_dir, id),
-	.head_offset = offsetof(struct process_proc_dir, node),
+	.key_offset = offsetof(struct process, id),
+	.head_offset = offsetof(struct process, node),
 };
-
-struct rhashtable worker_threads;    /* Table containing the worker threads */
-struct rhashtable scheduler_threads; /* Table containing the scheduler threads
-				      */
-struct rhashtable proc_directories;  /* Table containing the proc directories */
 
 /* Semaphore for accessing the worker_threads table */
 static DECLARE_RWSEM(worker_lock);
-/* Mutex for accessing the proc_directories table */
-static DEFINE_MUTEX(proc_directory_lock);
 
-static struct proc_dir_entry *ums_dir; /* The ums dir inside proc */
+/* The ums dir inside proc */
+static struct proc_dir_entry *ums_dir;
 
 /* Parameters for the proc files */
 static int scheduler_open(struct inode *inode, struct file *file);
@@ -183,11 +193,11 @@ int init_module(void)
 		goto fail_scheduler_threads;
 	}
 
-	ret = rhashtable_init(&proc_directories, &proc_directiory_table_params);
+	ret = rhashtable_init(&processes, &process_table_params);
 	if (ret < 0) {
 		printk(KERN_ALERT MODULE_NAME_LOG
-		       "Creating proc directory table failed\n");
-		goto fail_proc_directories;
+		       "Creating process table failed\n");
+		goto fail_process;
 	}
 
 	ums_dir = proc_mkdir("ums", NULL);
@@ -203,8 +213,8 @@ int init_module(void)
 	return SUCCESS;
 
 fail_ums_dir:
-	rhashtable_destroy(&proc_directories);
-fail_proc_directories:
+	rhashtable_destroy(&processes);
+fail_process:
 	rhashtable_destroy(&scheduler_threads);
 fail_scheduler_threads:
 	rhashtable_destroy(&worker_threads);
@@ -217,7 +227,7 @@ fail_mdev:
 void cleanup_module(void)
 {
 	proc_remove(ums_dir);
-	rhashtable_destroy(&proc_directories);
+	rhashtable_destroy(&processes);
 	rhashtable_destroy(&scheduler_threads);
 	rhashtable_destroy(&worker_threads);
 	misc_deregister(&mdev);
@@ -269,8 +279,6 @@ static int worker_show(struct seq_file *m, void *v)
 	ktime_t time;
 	s64 day, hour, min, sec, ms, us;
 
-	seq_printf(m, "Pid:\t %d\n", *id);
-
 	down_read(&worker_lock);
 
 	/* Retrieving the worker_thread struct from the worker_threads table */
@@ -278,6 +286,8 @@ static int worker_show(struct seq_file *m, void *v)
 					worker_thread_table_params);
 	if (worker != NULL) {
 		spin_lock(&worker->lock);
+
+		seq_printf(m, "Pid:\t %d\n", *id);
 
 		if (worker->state == UMS_RUNNING) {
 			seq_printf(m, "State:\t Running\n");
@@ -311,12 +321,6 @@ static int worker_show(struct seq_file *m, void *v)
 			   day, hour, min, sec, ms, us, time);
 
 		spin_unlock(&worker->lock);
-	} else {
-		/**
-		 * Once a worker terminates it frees its relative worker_thread
-		 * struct so we can't print all its statistics.
-		 */
-		seq_printf(m, "State:\t Terminated\n");
 	}
 
 	up_read(&worker_lock);
@@ -327,89 +331,6 @@ static int worker_show(struct seq_file *m, void *v)
 static int worker_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, worker_show, PDE_DATA(inode));
-}
-
-/**
- * create_process_proc_dir - creates a proc directory for the given process.
- * @pid: the PID of the process.
- *
- * Since the relative process_proc_dir struct is inserted in the
- * proc_directories table, it must be called while holding the
- * proc_directory_lock lock.
- *
- * Returns a pointer to a process_proc_dir struct containing the info about
- * the created directory on success, an error code on failure:
- *  -ENOMEM: not enough memory
- *  -EEXIST: directory already created
- */
-struct process_proc_dir *create_process_proc_dir(pid_t pid)
-{
-	int ret;
-	char id[INT_DECIMAL_STRING_SIZE(pid_t)];
-	struct process_proc_dir *dir, *err;
-
-	/* Allocating the process_proc_dir struct */
-	dir = kzalloc(sizeof(struct process_proc_dir), GFP_KERNEL);
-	if (dir == NULL) {
-		err = ERR_PTR(-ENOMEM);
-		goto fail_alloc;
-	}
-
-	dir->id = pid;
-	dir->num_schedulers = 0;
-	dir->last_sched_id = 0;
-
-	/* Creating the process proc dir */
-	sprintf(id, "%d", pid);
-	dir->pid_dir = proc_mkdir(id, ums_dir);
-	if (dir->pid_dir == NULL) {
-		err = ERR_PTR(-ENOMEM);
-		goto fail_mk_pid_dir;
-	}
-
-	/* Creating the schedulers dir */
-	dir->schedulers_dir = proc_mkdir("schedulers", dir->pid_dir);
-	if (dir->schedulers_dir == NULL) {
-		err = ERR_PTR(-ENOMEM);
-		goto fail_mk_schedulers_dir;
-	}
-
-	/* Inserting the struct in the proc_directories table */
-	ret = rhashtable_lookup_insert_fast(&proc_directories, &dir->node,
-					    proc_directiory_table_params);
-	if (ret < 0) {
-		err = ERR_PTR(ret);
-		goto fail_insert;
-	}
-
-	return dir;
-
-fail_insert:
-	proc_remove(dir->schedulers_dir);
-fail_mk_schedulers_dir:
-	proc_remove(dir->pid_dir);
-fail_mk_pid_dir:
-	kfree(dir);
-fail_alloc:
-	return err;
-}
-
-/**
- * remove_process_proc_dir - emoves the proc directory passed in input.
- * @dir: a pointer to a process_proc_dir struct containing the info about
- *       the directory to be removed.
- *
- * Since the relative struct process_proc_dir is also removed from the
- * proc_directories table, it must be called while holding the
- * proc_directory_lock lock.
- */
-void remove_process_proc_dir(struct process_proc_dir *dir)
-{
-	rhashtable_remove_fast(&proc_directories, &dir->node,
-			       proc_directiory_table_params);
-	proc_remove(dir->schedulers_dir);
-	proc_remove(dir->pid_dir);
-	kfree(dir);
 }
 
 int __register_worker_thread(pid_t worker_id, pid_t *userspace_worker_id)
@@ -435,7 +356,7 @@ int __register_worker_thread(pid_t worker_id, pid_t *userspace_worker_id)
 
 	down_write(&worker_lock);
 
-	/* Inserting the struct in the proc_directories table */
+	/* Inserting the struct in the worker_threads table */
 	ret = rhashtable_lookup_insert_fast(&worker_threads, &worker->node,
 					    worker_thread_table_params);
 	if (ret < 0)
@@ -456,7 +377,8 @@ int __register_worker_thread(pid_t worker_id, pid_t *userspace_worker_id)
 	/* After context switch */
 	now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Retrieving scheduler_thread struct from the scheduler_threads table
 	 */
 	scheduler =
 		rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
@@ -495,28 +417,29 @@ int __worker_thread_terminated(pid_t worker_id)
 	struct worker_thread *worker;
 	struct task_struct *pcb;
 
-	down_write(&worker_lock);
+	down_read(&worker_lock);
 
 	/* Retrieving worker_tread struct from the worker_threads table */
 	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
 					worker_thread_table_params);
 	if (worker == NULL) {
-		up_write(&worker_lock);
+		up_read(&worker_lock);
 		return -ESRCH;
 	}
 
-	/* Retrieving the task_struct of the scheduler */
+	spin_lock(&worker->lock);
+
+	/* Updating worker struct and retrieving scheduler task_struct */
+	worker->running_time =
+		ktime_add(worker->running_time,
+			  ktime_sub(ktime_get(), worker->last_switch));
 	pcb = pid_task(find_vpid(worker->scheduler), PIDTYPE_PID);
+	worker->state = UMS_DEAD;
+	worker->scheduler = -1;
 
-	/**
-	 * Removing the worker_thread struct from the worker_threads table and
-	 * freeing it
-	 */
-	rhashtable_remove_fast(&worker_threads, &worker->node,
-			       worker_thread_table_params);
-	kfree(worker);
+	spin_unlock(&worker->lock);
 
-	up_write(&worker_lock);
+	up_read(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n",
 	       worker_id, pcb->pid);
@@ -533,7 +456,7 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 				struct thread_list *completion_list)
 {
 	struct scheduler_thread *scheduler;
-	struct process_proc_dir *process_dir;
+	struct process *process;
 	char index[INT_DECIMAL_STRING_SIZE(int)];
 	int ret, i;
 
@@ -573,30 +496,21 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 		       sched_id, scheduler->completion_list[i]);
 	}
 
-	/*
-	 * Creating proc directory for the scheduler.
-	 * We first check if the process proc directory already exists,
-	 * otherwise we create it.
-	 */
-	mutex_lock(&proc_directory_lock);
-	process_dir = rhashtable_lookup_fast(&proc_directories, &process_id,
-					     proc_directiory_table_params);
-	if (process_dir == NULL)
-		process_dir = create_process_proc_dir(process_id);
+	/* Retrieving process struct */
+	process = rhashtable_lookup_fast(&processes, &process_id,
+					 process_table_params);
+	// check errors
 
-	if (IS_ERR(process_dir)) {
-		ret = PTR_ERR(process_dir);
-		goto fail_process_dir;
-	}
-
-	process_dir->num_schedulers++;
-	sprintf(index, "%d", process_dir->last_sched_id++);
-	scheduler->dir = proc_mkdir(index, process_dir->schedulers_dir);
+	/* Creating scheduler proc dir */
+	spin_lock(&process->lock);
+	sprintf(index, "%d", process->last_sched_dir_name++);
+	list_add(&scheduler->list_node, &process->schedulers_list);
+	scheduler->dir = proc_mkdir(index, process->schedulers_dir);
 	if (scheduler->dir == NULL) {
 		ret = -ENOMEM;
 		goto fail_dir;
 	}
-	mutex_unlock(&proc_directory_lock);
+	spin_unlock(&process->lock);
 
 	/* Creating scheduler info file */
 	if (!proc_create_data("info", 0, scheduler->dir, &scheduler_fops,
@@ -625,7 +539,7 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 
 	/* Inserting the struct in the scheduler_threads table */
 	ret = rhashtable_lookup_insert_fast(&scheduler_threads,
-					    &scheduler->node,
+					    &scheduler->table_node,
 					    scheduler_thread_table_params);
 	if (ret < 0)
 		goto fail_insert;
@@ -642,14 +556,11 @@ fail_worker_info:
 fail_workers_dir:
 	remove_proc_entry("info", scheduler->dir);
 fail_scheduler_info:
-	mutex_lock(&proc_directory_lock);
 	proc_remove(scheduler->dir);
 fail_dir:
-	process_dir->last_sched_id--;
-	if (--process_dir->num_schedulers == 0)
-		remove_process_proc_dir(process_dir);
-fail_process_dir:
-	mutex_unlock(&proc_directory_lock);
+	list_del(&scheduler->list_node);
+	process->last_sched_dir_name--;
+	spin_unlock(&process->lock);
 fail_copy_from_user:
 	kfree(scheduler->completion_list);
 fail_completion_list_alloc:
@@ -658,67 +569,14 @@ fail_scheduler_alloc:
 	return ret;
 }
 
-int __scheduler_thread_terminated(pid_t sched_id, pid_t process_id)
-{
-	struct scheduler_thread *scheduler;
-	struct process_proc_dir *process_dir;
-	char index[INT_DECIMAL_STRING_SIZE(int)];
-	int i;
-
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
-	 */
-	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
-					   scheduler_thread_table_params);
-	if (scheduler == NULL)
-		return -ESRCH;
-
-	/* Removing the scheduler_thread struct from the scheduler_threads table
-	 */
-	rhashtable_remove_fast(&scheduler_threads, &scheduler->node,
-			       scheduler_thread_table_params);
-
-	/* Removing the workers proc files and directory */
-	for (i = 0; i < scheduler->num_workers; i++) {
-		sprintf(index, "%d", i);
-		remove_proc_entry(index, scheduler->workers_dir);
-	}
-	proc_remove(scheduler->workers_dir);
-
-	/* Removing the scheduler info file */
-	remove_proc_entry("info", scheduler->dir);
-
-	mutex_lock(&proc_directory_lock);
-
-	/* Removing the scheduler proc directory */
-	proc_remove(scheduler->dir);
-
-	/* Retrieving process_proc_dir struct from the proc_directories table */
-	process_dir = rhashtable_lookup_fast(&proc_directories, &process_id,
-					     proc_directiory_table_params);
-
-	/**
-	 * If this is the last scheduler of this process we can remove the
-	 * process proc dir
-	 */
-	if (--process_dir->num_schedulers == 0)
-		remove_process_proc_dir(process_dir);
-
-	mutex_unlock(&proc_directory_lock);
-
-	/* Freeing the completion list and the scheduler struct */
-	kfree(scheduler->completion_list);
-	kfree(scheduler);
-
-	return SUCCESS;
-}
-
 int __dequeue_ums_completion_list_items(pid_t sched_id)
 {
 	struct scheduler_thread *scheduler;
 	struct worker_thread *worker;
 	int i, found;
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Retrieving scheduler_thread struct from the scheduler_threads table
 	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
@@ -762,31 +620,31 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 				&worker_threads, &scheduler->completion_list[i],
 				worker_thread_table_params);
 
-			/* If the worker is not in the table it has terminated
-			 */
 			if (worker != NULL) {
 				spin_lock(&worker->lock);
+				if (worker->state != UMS_DEAD) {
+					found++;
 
-				found++;
-
-				/**
-				 * If worker->scheduler = -1 it is not assigned
-				 * to a scheduler
-				 */
-				if (worker->scheduler == -1) {
 					/**
-					 * Assiging the worker to this scheduler
+					 * If worker->scheduler = -1 it is not
+					 * assigned to a scheduler
 					 */
-					worker->scheduler = sched_id;
-					scheduler->dequeued_items
-						[scheduler->num_dequeued_items++] =
-						worker->id;
+					if (worker->scheduler == -1) {
+						/**
+						 * Assiging the worker to this
+						 * scheduler
+						 */
+						worker->scheduler = sched_id;
+						scheduler->dequeued_items
+							[scheduler
+								 ->num_dequeued_items++] =
+							worker->id;
 
-					printk(KERN_DEBUG MODULE_NAME_LOG
-					       "scheduler:%d dequeued worker:%d\n",
-					       sched_id, worker->id);
+						printk(KERN_DEBUG MODULE_NAME_LOG
+						       "scheduler:%d dequeued worker:%d\n",
+						       sched_id, worker->id);
+					}
 				}
-
 				spin_unlock(&worker->lock);
 			}
 
@@ -814,7 +672,8 @@ int __get_dequeued_items(pid_t sched_id, pid_t *userspace_list)
 {
 	struct scheduler_thread *scheduler;
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Retrieving scheduler_thread struct from the scheduler_threads table
 	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
@@ -840,7 +699,8 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	struct task_struct *pcb;
 	ktime_t now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Retrieving scheduler_thread struct from the scheduler_threads table
 	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
@@ -942,7 +802,8 @@ int __ums_thread_yield(pid_t id)
 	/* After context switch */
 	now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Retrieving scheduler_thread struct from the scheduler_threads table
 	 */
 	scheduler =
 		rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
@@ -1000,14 +861,6 @@ static long device_ioctl(struct file *file, unsigned int request,
 		return __register_scheduler_thread(current->pid, current->tgid,
 						   &list);
 
-	case SCHEDULER_THREAD_TERMINATED:
-		printk(KERN_DEBUG MODULE_NAME_LOG
-		       "SCHEDULER_THREAD_TERMINATED pid:%d\n",
-		       current->pid);
-
-		return __scheduler_thread_terminated(current->pid,
-						     current->tgid);
-
 	case DEQUEUE_UMS_COMPLETION_LIST_ITEMS:
 		printk(KERN_DEBUG MODULE_NAME_LOG
 		       "DEQUEUE_UMS_COMPLETION_LIST_ITEMS pid:%d\n",
@@ -1039,6 +892,125 @@ static long device_ioctl(struct file *file, unsigned int request,
 	}
 
 	return -EINVAL;
+}
+
+void free_worker_thread(int worker_id)
+{
+	struct worker_thread *worker;
+
+	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
+					worker_thread_table_params);
+
+	if (worker != NULL) {
+		rhashtable_remove_fast(&worker_threads, &worker->node,
+				       worker_thread_table_params);
+		kfree(worker);
+	}
+}
+
+void free_scheduler_thread(struct scheduler_thread *scheduler)
+{
+	char index[INT_DECIMAL_STRING_SIZE(int)];
+	int i;
+
+	/* Removing the scheduler_thread struct from the scheduler_threads table
+	 */
+	rhashtable_remove_fast(&scheduler_threads, &scheduler->table_node,
+			       scheduler_thread_table_params);
+
+	/* Removing the workers structs, proc files and directory */
+	for (i = 0; i < scheduler->num_workers; i++) {
+		sprintf(index, "%d", i);
+		remove_proc_entry(index, scheduler->workers_dir);
+		free_worker_thread(scheduler->completion_list[i]);
+	}
+	proc_remove(scheduler->workers_dir);
+
+	/* Removing the scheduler info file */
+	remove_proc_entry("info", scheduler->dir);
+
+	/* Removing the scheduler proc directory */
+	proc_remove(scheduler->dir);
+
+	/* Freeing memory */
+	kfree(scheduler->completion_list);
+	if (scheduler->num_dequeued_items > 0)
+		kfree(scheduler->dequeued_items);
+	kfree(scheduler);
+}
+
+int device_open(struct inode *inode, struct file *file)
+{
+	int ret;
+	char id[INT_DECIMAL_STRING_SIZE(pid_t)];
+	struct process *process;
+
+	/* Allocating the process struct */
+	process = kzalloc(sizeof(struct process), GFP_KERNEL);
+	if (process == NULL) {
+		ret = -ENOMEM;
+		goto fail_alloc;
+	}
+
+	process->id = current->tgid;
+	process->last_sched_dir_name = 0;
+	INIT_LIST_HEAD(&process->schedulers_list);
+
+	/* Creating the process proc dir */
+	sprintf(id, "%d", current->tgid);
+	process->pid_dir = proc_mkdir(id, ums_dir);
+	if (process->pid_dir == NULL) {
+		ret = -ENOMEM;
+		goto fail_mk_pid_dir;
+	}
+
+	/* Creating the schedulers dir */
+	process->schedulers_dir = proc_mkdir("schedulers", process->pid_dir);
+	if (process->schedulers_dir == NULL) {
+		ret = -ENOMEM;
+		goto fail_mk_schedulers_dir;
+	}
+
+	/* Inserting the struct in the processes table */
+	ret = rhashtable_lookup_insert_fast(&processes, &process->node,
+					    process_table_params);
+	if (ret < 0) {
+		goto fail_insert;
+	}
+
+	return SUCCESS;
+
+fail_insert:
+	proc_remove(process->schedulers_dir);
+fail_mk_schedulers_dir:
+	proc_remove(process->pid_dir);
+fail_mk_pid_dir:
+	kfree(process);
+fail_alloc:
+	return ret;
+}
+
+int device_release(struct inode *inode, struct file *file)
+{
+	struct process *process;
+	struct scheduler_thread *scheduler, *tmp;
+
+	process = rhashtable_lookup_fast(&processes, &current->tgid,
+					 process_table_params);
+	if (process != NULL) {
+		list_for_each_entry_safe (
+			scheduler, tmp, &process->schedulers_list, list_node) {
+			list_del(&scheduler->list_node);
+			free_scheduler_thread(scheduler);
+		}
+		rhashtable_remove_fast(&processes, &process->node,
+				       process_table_params);
+		proc_remove(process->schedulers_dir);
+		proc_remove(process->pid_dir);
+		kfree(process);
+	}
+
+	return SUCCESS;
 }
 
 MODULE_LICENSE("GPL");

@@ -1,5 +1,7 @@
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "../kernel/ums_interface.h"
 #include "ums.h"
@@ -19,6 +21,45 @@ pthread_once_t exit_key_once = PTHREAD_ONCE_INIT;
 
 pthread_key_t entrypoint_key;
 pthread_once_t entrypoint_key_once = PTHREAD_ONCE_INIT;
+
+/* File descriptor of the UMS module */
+int fd = -1;
+
+void close_at_exit() {
+	close(fd);
+}
+
+/**
+ * Executes a request to the UMS module.
+ * If it is not already opened, it opens the file descriptor of the module
+ * and registers a function to close the it whe the program exits.
+ * If it cannot open the descriptor it setts errno to ENOSYS to indicate that
+ * the UMS module is not loaded.
+ */
+int ums_syscall(unsigned int req_num, void *data)
+{
+	if (fd < 0) {
+		fd = open("/dev/" DEVICE_NAME, 0);
+
+		if (fd < 0) {
+			errno = ENOSYS;
+			return -1;
+		}
+		atexit(close_at_exit);
+	}
+
+	int ret = ioctl(fd, req_num, data);
+
+	/**
+	 * If errno == EBADF it means that the file descriptor was already
+	 * opened in the past, but the module is not loaded anymore so it sets
+	 * errno to ENOSYS 
+	 */
+	if (ret < 0 && errno == EBADF)
+		errno = ENOSYS;
+
+	return ret;
+}
 
 void worker_thread_destructor(void *ptr)
 {
@@ -174,9 +215,6 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t entrypoint,
 	 * in the completion list should have terminated
 	 */
 	entrypoint();
-
-	/* Notifing the ums modle of the scheduler termination for cleanup */
-	ums_syscall(SCHEDULER_THREAD_TERMINATED, NULL);
 
 	return 0;
 }
