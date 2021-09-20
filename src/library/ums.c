@@ -6,9 +6,12 @@
 
 /* Struct used to pass arguments to a worker thread */
 struct worker_args {
-	void *(*start_routine)(void *); /* The routine the worker should execute */
-	void *arg;											/* The argument for start_routine */
-	ums_t *thread; 									/* The struct representing the worker thread */
+	/* The routine the worker should execute */
+	void	*(*start_routine)(void *);
+	/* The argument for start_routine */
+	void	*arg;
+	/* The struct representing the worker thread */			
+	ums_t	*thread;
 };
 
 pthread_key_t exit_key;
@@ -29,7 +32,8 @@ void worker_thread_destructor(void *ptr)
 
 void create_exit_key()
 {
-	while (pthread_key_create(&exit_key, worker_thread_destructor) == EAGAIN)
+	while (pthread_key_create(&exit_key, worker_thread_destructor) ==
+	       EAGAIN)
 		continue;
 }
 
@@ -38,11 +42,12 @@ void *worker_thread_start_routine(void *ptr)
 	int ret;
 	struct worker_args *args = (struct worker_args *)ptr;
 
-	/** 
-	 * We set exit_key to args. This is a trick to make it so that the key 
-	 * destructor worker_thread_destructor is executed when the worker terminates.
-	 * worker_thread_destructor will execute the WORKER_THREAD_TERMINATED syscall
-	 * to notify the ums module of the worker termination
+	/**
+	 * We set exit_key to args. This is a trick to make it so that the key
+	 * destructor worker_thread_destructor is executed when the worker
+	 * terminates. worker_thread_destructor will execute the
+	 * WORKER_THREAD_TERMINATED syscall to notify the ums module of the
+	 * worker termination
 	 */
 	pthread_once(&exit_key_once, create_exit_key);
 	ret = pthread_setspecific(exit_key, args);
@@ -52,10 +57,10 @@ void *worker_thread_start_routine(void *ptr)
 	}
 
 	/**
-	 * Registering the worker thread. If successful the thread wiil be blocked
-	 * until it is scheduler by a ums scheduler. The syscall will also put the
-	 * worker pid in args->thread->pid, notifing the parent thread of the 
-	 * succesful creation of the worker
+	 * Registering the worker thread. If successful the thread wiil be
+	 * blocked until it is scheduler by a ums scheduler. The syscall will
+	 * also put the worker pid in args->thread->pid, notifing the parent
+	 * thread of the succesful creation of the worker
 	 */
 	ret = ums_syscall(REGISTER_WORKER_THREAD, &args->thread->pid);
 	if (ret < 0) {
@@ -81,7 +86,7 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 
 	/* Creating the worker thread */
 	int ret = pthread_create(&thread->pthread_id, NULL,
-													 worker_thread_start_routine, (void *)args);
+				 worker_thread_start_routine, (void *)args);
 	if (ret != 0) {
 		free(args);
 		errno = ret;
@@ -89,17 +94,17 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 	}
 
 	/**
-	 * Waiting for the worker thread to set thread->pid to its pid, signaling
-	 * a successful creation
+	 * Waiting for the worker thread to set thread->pid to its pid,
+	 * signaling a successful creation
 	 */
 	while (thread->pid == 0)
 		continue;
 
 	/**
-	 *  If thread->pid is less then zero it means that the worker thread 
-	 * 	encoutered an error during initialization and set thread->pid to the
-	 * 	error code negated. We then join the thread and return the error to 
-	 * 	the caller
+	 * If thread->pid is less then zero it means that the worker thread
+	 * encoutered an error during initialization and set thread->pid to the
+	 * error code negated. We then join the thread and return the error to
+	 * the caller
 	 */
 	if (thread->pid < 0) {
 		free(args);
@@ -118,12 +123,12 @@ void create_entrypoint_key()
 }
 
 int enter_ums_scheduling_mode(scheduler_entrypoint_t entrypoint,
-															ums_completion_list_t *completion_list)
+			      ums_completion_list_t *completion_list)
 {
 	int ret;
 
 	if (entrypoint == NULL || completion_list == NULL ||
-			completion_list->size == 0) {
+	    completion_list->size == 0) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -137,7 +142,7 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t entrypoint,
 	}
 
 	/**
-	 * Filling a thread_list struct with the pids of the workers in the 
+	 * Filling a thread_list struct with the pids of the workers in the
 	 * completion list in order to pass the list to the ums module
 	 */
 	pid_t workers[completion_list->size];
@@ -159,14 +164,14 @@ int enter_ums_scheduling_mode(scheduler_entrypoint_t entrypoint,
 	if (ret < 0)
 		return -1;
 
-	/* 
-	 * Executing the entry point function to select the first worker to schedule.
-	 * The call is actually recursive: every call to execute_ums_thread inside
-	 * the entry point function will result in another call to the entry point
-	 * when the worker ends or yields. If the entry point has been correctly 
-	 * defined by the user and there are no errors, when this first call to 
-	 * the entry point ends all workers in the completion list should have
-	 * terminated
+	/*
+	 * Executing the entry point function to select the first worker to
+	 * schedule. The call is actually recursive: every call to
+	 * execute_ums_thread inside the entry point function will result in
+	 * another call to the entry point when the worker ends or yields. If
+	 * the entry point has been correctly defined by the user and there are
+	 * no errors, when this first call to the entry point ends all workers
+	 * in the completion list should have terminated
 	 */
 	entrypoint();
 
@@ -204,7 +209,7 @@ void delete_ums_completion_list(ums_completion_list_t *completion_list)
 }
 
 int enqueue_ums_completion_list_item(ums_completion_list_t *completion_list,
-																		 ums_t thread)
+				     ums_t thread)
 {
 	if (completion_list == NULL) {
 		errno = EINVAL;
@@ -250,16 +255,19 @@ int execute_ums_thread(pid_t thread)
 	}
 
 	/**
-	 * Retrieving the entry point function for the scheduler from the 
+	 * Retrieving the entry point function for the scheduler from the
 	 * entrypoint_key key. If the execution of the worker was successful it
-	 * means that execute_ums_thread was called by a registered scheduler and
-	 * thus entrypoint_key must be set to the pointer of the entry point 
+	 * means that execute_ums_thread was called by a registered scheduler
+	 * and thus entrypoint_key must be set to the pointer of the entry point
 	 * function
 	 */
 	scheduler_entrypoint_t scheduler_entrypoint =
 		(scheduler_entrypoint_t)pthread_getspecific(entrypoint_key);
 
-	/* Calling the entry point function to select the next worker to be scheduled */
+	/**
+	 * Calling the entry point function to select the next worker to be
+	 * scheduled
+	 */
 	scheduler_entrypoint();
 
 	return 0;
@@ -351,7 +359,8 @@ int ums_thread_yield()
 
 ready_queue_t *create_ready_queue()
 {
-	ready_queue_t *ready_queue = (ready_queue_t *)malloc(sizeof(ready_queue_t));
+	ready_queue_t *ready_queue =
+		(ready_queue_t *)malloc(sizeof(ready_queue_t));
 	if (ready_queue == NULL)
 		return NULL;
 
