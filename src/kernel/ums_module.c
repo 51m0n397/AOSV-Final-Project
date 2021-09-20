@@ -37,14 +37,14 @@
  * @last_switch: the time the last switch occurred.
  */
 struct worker_thread {
-	pid_t			id;
-	struct rhash_head	node;
-	spinlock_t		lock;
-	pid_t			scheduler;
-	int			state;
-	int			num_switch;
-	ktime_t			running_time;
-	ktime_t			last_switch;
+	pid_t id;
+	struct rhash_head node;
+	spinlock_t lock;
+	pid_t scheduler;
+	int state;
+	int num_switch;
+	ktime_t running_time;
+	ktime_t last_switch;
 };
 
 /**
@@ -64,19 +64,19 @@ struct worker_thread {
  * @last_switch_start: the time the last switch started.
  */
 struct scheduler_thread {
-	pid_t			id;
-	struct rhash_head	node;
-	spinlock_t		lock;
-	pid_t			*completion_list;
-	int			num_workers;
-	pid_t			*dequeued_items;
-	int			num_dequeued_items;
-	struct proc_dir_entry	*dir;
-	struct proc_dir_entry	*workers_dir;
-	pid_t			worker;
-	int			num_switch;
-	ktime_t			last_switch_time;
-	ktime_t			last_switch_start;
+	pid_t id;
+	struct rhash_head node;
+	spinlock_t lock;
+	pid_t *completion_list;
+	int num_workers;
+	pid_t *dequeued_items;
+	int num_dequeued_items;
+	struct proc_dir_entry *dir;
+	struct proc_dir_entry *workers_dir;
+	pid_t worker;
+	int num_switch;
+	ktime_t last_switch_time;
+	ktime_t last_switch_start;
 };
 
 /**
@@ -88,49 +88,50 @@ struct scheduler_thread {
  * @schedulers_dir: the schedulers dir inside @pid_dir.
  */
 struct process_proc_dir {
-	pid_t			id;
-	struct rhash_head	node;
-	int			num_schedulers;
-	int			last_sched_id;
-	struct proc_dir_entry	*pid_dir;
-	struct proc_dir_entry	*schedulers_dir;
+	pid_t id;
+	struct rhash_head node;
+	int num_schedulers;
+	int last_sched_id;
+	struct proc_dir_entry *pid_dir;
+	struct proc_dir_entry *schedulers_dir;
 };
 
 /* Parameters for the device */
 static long device_ioctl(struct file *file, unsigned int request,
 			 unsigned long data);
-static struct file_operations fops = { 
+static struct file_operations fops = {
 	.unlocked_ioctl = device_ioctl,
 };
 
-static struct miscdevice mdev = { 
-	.minor	= 0,
-	.name	= DEVICE_NAME,
-	.mode	= S_IALLUGO,
-	.fops	= &fops,
+static struct miscdevice mdev = {
+	.minor = 0,
+	.name = DEVICE_NAME,
+	.mode = S_IALLUGO,
+	.fops = &fops,
 };
 
 /* Parameters for the tables */
 const static struct rhashtable_params worker_thread_table_params = {
-	.key_len	= sizeof(pid_t),
-	.key_offset	= offsetof(struct worker_thread, id),
-	.head_offset	= offsetof(struct worker_thread, node),
+	.key_len = sizeof(pid_t),
+	.key_offset = offsetof(struct worker_thread, id),
+	.head_offset = offsetof(struct worker_thread, node),
 };
 
 const static struct rhashtable_params scheduler_thread_table_params = {
-	.key_len	= sizeof(pid_t),
-	.key_offset	= offsetof(struct scheduler_thread, id),
-	.head_offset	= offsetof(struct scheduler_thread, node),
+	.key_len = sizeof(pid_t),
+	.key_offset = offsetof(struct scheduler_thread, id),
+	.head_offset = offsetof(struct scheduler_thread, node),
 };
 
 const static struct rhashtable_params proc_directiory_table_params = {
-	.key_len	= sizeof(pid_t),
-	.key_offset	= offsetof(struct process_proc_dir, id),
-	.head_offset	= offsetof(struct process_proc_dir, node),
+	.key_len = sizeof(pid_t),
+	.key_offset = offsetof(struct process_proc_dir, id),
+	.head_offset = offsetof(struct process_proc_dir, node),
 };
 
 struct rhashtable worker_threads;    /* Table containing the worker threads */
-struct rhashtable scheduler_threads; /* Table containing the scheduler threads */
+struct rhashtable scheduler_threads; /* Table containing the scheduler threads
+				      */
 struct rhashtable proc_directories;  /* Table containing the proc directories */
 
 /* Semaphore for accessing the worker_threads table */
@@ -142,17 +143,17 @@ static struct proc_dir_entry *ums_dir; /* The ums dir inside proc */
 
 /* Parameters for the proc files */
 static int scheduler_open(struct inode *inode, struct file *file);
-static struct proc_ops scheduler_fops = { 
-	.proc_open	= scheduler_open,
-	.proc_read	= seq_read,
-	.proc_release	= single_release,
+static struct proc_ops scheduler_fops = {
+	.proc_open = scheduler_open,
+	.proc_read = seq_read,
+	.proc_release = single_release,
 };
 
 static int worker_open(struct inode *inode, struct file *file);
 static struct proc_ops worker_fops = {
-	.proc_open	= worker_open,
-	.proc_read	= seq_read,
-	.proc_release	= single_release,
+	.proc_open = worker_open,
+	.proc_read = seq_read,
+	.proc_release = single_release,
 };
 
 int init_module(void)
@@ -455,7 +456,8 @@ int __register_worker_thread(pid_t worker_id, pid_t *userspace_worker_id)
 	/* After context switch */
 	now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler =
 		rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
 				       scheduler_thread_table_params);
@@ -663,13 +665,15 @@ int __scheduler_thread_terminated(pid_t sched_id, pid_t process_id)
 	char index[INT_DECIMAL_STRING_SIZE(int)];
 	int i;
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
 	if (scheduler == NULL)
 		return -ESRCH;
 
-	/* Removing the scheduler_thread struct from the scheduler_threads table */
+	/* Removing the scheduler_thread struct from the scheduler_threads table
+	 */
 	rhashtable_remove_fast(&scheduler_threads, &scheduler->node,
 			       scheduler_thread_table_params);
 
@@ -714,7 +718,8 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 	struct worker_thread *worker;
 	int i, found;
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
 	if (scheduler == NULL)
@@ -751,13 +756,14 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 
 			/**
 			 * Retrieving worker_thread struct from the
-			 * worker_threads table 
+			 * worker_threads table
 			 */
 			worker = rhashtable_lookup_fast(
 				&worker_threads, &scheduler->completion_list[i],
 				worker_thread_table_params);
 
-			/* If the worker is not in the table it has terminated */
+			/* If the worker is not in the table it has terminated
+			 */
 			if (worker != NULL) {
 				spin_lock(&worker->lock);
 
@@ -765,7 +771,7 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 
 				/**
 				 * If worker->scheduler = -1 it is not assigned
-				 * to a scheduler 
+				 * to a scheduler
 				 */
 				if (worker->scheduler == -1) {
 					/**
@@ -808,7 +814,8 @@ int __get_dequeued_items(pid_t sched_id, pid_t *userspace_list)
 {
 	struct scheduler_thread *scheduler;
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
 	if (scheduler == NULL)
@@ -833,7 +840,8 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	struct task_struct *pcb;
 	ktime_t now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler = rhashtable_lookup_fast(&scheduler_threads, &sched_id,
 					   scheduler_thread_table_params);
 	if (scheduler == NULL)
@@ -902,8 +910,10 @@ int __ums_thread_yield(pid_t id)
 	/* Retrieving worker_thread struct from the worker_threads table */
 	worker = rhashtable_lookup_fast(&worker_threads, &id,
 					worker_thread_table_params);
-	if (worker == NULL)
+	if (worker == NULL) {
+		down_read(&worker_lock);
 		return -ESRCH;
+	}
 
 	spin_lock(&worker->lock);
 
@@ -932,7 +942,8 @@ int __ums_thread_yield(pid_t id)
 	/* After context switch */
 	now = ktime_get();
 
-	/* Retrieving scheduler_thread struct from the scheduler_threads table */
+	/* Retrieving scheduler_thread struct from the scheduler_threads table
+	 */
 	scheduler =
 		rhashtable_lookup_fast(&scheduler_threads, &worker->scheduler,
 				       scheduler_thread_table_params);
