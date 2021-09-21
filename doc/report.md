@@ -40,8 +40,8 @@ The function will call pthread_create() to create a thread that will first issue
 
 # Results
 The test program was executed in a VM with 6 CPU logical cores and 8 GB of ram on top of a 2012 MacBook Pro with an i7 3720QM with base and boost clocks of 2.6 GHz and 3.6 GHz respectively. The code defines 6 scheduler threads (one per core), 12 worker threads, and two completion lists. The first completion list contains all the workers while the second only the odd ones. Similarly, even schedulers use the first completion list while odd schedulers the second. This allows testing both schedulers sharing completion lists and completion lists sharing workers. Each worker yields 100 times. 
-The average switch time was 124894 nanoseconds, with a minimum of 3197 nanoseconds, a maximum of 29454999 nanoseconds and a standard deviation of 1348439. 
-Testing following the procedure detailed [here](https://eli.thegreenplace.net/2018/measuring-context-switching-and-memory-overheads-for-linux-threads/#id7) I get an average system context switch time of 6426 nanoseconds on the same VM. This means that the overhead of my module is significantly high on average. My hypothesis is that this is due to two factors:
+The average switch time was 124894 nanoseconds, with a median of  6326 nanoseconds, a minimum of 3197 nanoseconds, a maximum of 29454999 nanoseconds and a standard deviation of 1348439. 
+Testing following the procedure detailed [here](https://eli.thegreenplace.net/2018/measuring-context-switching-and-memory-overheads-for-linux-threads/#id7) I get an average system context switch time of 6426 nanoseconds on the same VM. This means that the overhead of my module varies a lot from nearly zero to very significant. My hypothesis is that this is due to two factors:
 - waiting to acquire the lock to access the worker and scheduler structs;
 - the OS scheduler not always scheduling immediately the worker;
 
