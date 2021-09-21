@@ -2,7 +2,7 @@
  * @file ums_interface.h
  * @author Simone Bartolini
  * @brief User Mode Scheduling kernel module interface. It defines the ioctl
- *        request numbers to be used to comunicate with the module.
+ *        request numbers to be used to communicate with the module.
  */
 
 #ifndef _UMS_INTERFACE_H
@@ -74,7 +74,7 @@ struct thread_list {
 
 /**
  * @brief   Scans the completion list of the calling UMS scheduler thread to
- *          check if there are UMS worker thread ready to be executed. Blocks
+ *          check if there are UMS worker threads ready to be executed. Blocks
  *          until there is at least one ready worker thread, unless all worker
  *          threads terminated. Use ::GET_DEQUEUED_ITEMS to retrieve the list of
  *          ready worker threads.
@@ -83,7 +83,7 @@ struct thread_list {
  *          errno will contain the error code.
  *
  * <b> Error codes </b>
- *  - [ESRCH]:  The calling process is not a registered UMS scheduler threads.
+ *  - [ESRCH]:  The calling process is not a registered UMS scheduler thread.
  *  - [EPERM]:  You are not allowed to call ::DEQUEUE_UMS_COMPLETION_LIST_ITEMS
  *              again without calling ::GET_DEQUEUED_ITEMS first.
  *  - [ENOMEM]: Not enough memory.
@@ -96,12 +96,12 @@ struct thread_list {
  *          call to ::DEQUEUE_UMS_COMPLETION_LIST_ITEMS. You need to pass in
  *          input an array of pid_t of size equal to the number of worker
  *          threads returned by ::DEQUEUE_UMS_COMPLETION_LIST_ITEMS. The array
- *          will be populated with the pids of the dequeued workers.
+ *          will be populated with the PIDs of the dequeued workers.
  *
  * @return  0 on success, -1 on error, errno will contain the error code.
  *
  * <b> Error codes </b>
- *  - [ESRCH]:  The calling process is not a registered UMS scheduler threads.
+ *  - [ESRCH]:  The calling process is not a registered UMS scheduler thread.
  *  - [EFAULT]: Invalid address passed in input.
  **/
 #define GET_DEQUEUED_ITEMS		  _IOR(UMS_MAGIC, 4, pid_t *)
@@ -113,8 +113,8 @@ struct thread_list {
  * @return  0 on success, -1 on error, errno will contain the error code.
  *
  * <b> Error codes </b>
- *  - [ESRCH]: The calling process is not a registered UMS scheduler threads.
- *  - [ESRCH]: The passed PID does not corresponds to a registered UMS worker
+ *  - [ESRCH]: The calling process is not a registered UMS scheduler thread.
+ *  - [ESRCH]: The passed PID does not correspond to a registered UMS worker
  *             thread.
  **/
 #define EXECUTE_UMS_THREAD		  _IOW(UMS_MAGIC, 5, pid_t *)

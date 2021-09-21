@@ -1,7 +1,7 @@
 /**
  * @file ums.h
  * @author Simone Bartolini
- * @brief User Mode Scheduling library. To be used in congiuntion with the UMS
+ * @brief User Mode Scheduling library. To be used in conjunction with the UMS
  *        kernel module to be able to schedule threads without involving the
  *        kernel scheduler.
  */
@@ -93,7 +93,7 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg);
  *
  * @param   completion_list  A pointer to a ::ums_completion_list_t variable
  *                           containing the list of worker threads to be
- * scheduled.
+ *                           scheduled.
  *
  * @return  0 on success, -1 on error, errno will contain the error code.
  *
@@ -103,7 +103,7 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg);
  *  - [EINVAL]: \a completion_list is not a valid completion list or it is
  *              empty.
  *  - [ENOMEM]: Not enough memory.
- *  - [EEXIST]: Scheduler alredy registered. This can only happen if you are
+ *  - [EEXIST]: Scheduler already registered. This can only happen if you are
  *              calling this function inside the entry point function of an
  *              already registered scheduler.
  */
@@ -164,7 +164,7 @@ int execute_ums_thread(pid_t thread);
 /**
  * @brief   Retrieves the list of ready UMS worker threads inside the completion
  *          list of the calling UMS scheduler thread. It blocks until it either
- *          finds at lest one ready worker thread or all worker threads
+ *          finds at least one ready worker thread or all worker threads
  *          terminated.
  *
  * @param   list  A pointer to a ::ums_list_node_t pointer. Once the function
@@ -172,7 +172,7 @@ int execute_ums_thread(pid_t thread);
  *                ready worker threads, unless all worker threads terminated.
  *
  * @return  The number of worker thread dequeued on success, -1 on error, errno
- * will contain the error code.
+ *          will contain the error code.
  *
  * <b> Error codes </b>
  *  - [ENOSYS]: The UMS module is not loaded.
@@ -197,7 +197,7 @@ ums_list_node_t *get_next_ums_list_item(ums_list_node_t *item);
 /**
  * @brief   Yields the CPU from the calling UMS worker thread and to the UMS
  *          scheduler thread that executed it. The scheduler will execute the
- *          entry point function to select the next worker to be runned.
+ *          entry point function to select the next worker to be executed.
  *
  * @return  0 on success, -1 on error, errno will contain the error code.
  *
@@ -235,9 +235,9 @@ int delete_ready_queue(ready_queue_t *ready_queue);
 /**
  * @brief   Enqueues a UMS worker thread inside a ready queue.
  *
- * @param   ready_queue  A pointer to the ready queue in which to equeue the
+ * @param   ready_queue  A pointer to the ready queue in which to enqueue the
  *                       worker thread.
- * @param   item         A pointer to the an element of a ready thread list
+ * @param   item         A pointer to an element of a ready thread list
  *                       retrieved by calling
  *                       ::dequeue_ums_completion_list_items.
  *

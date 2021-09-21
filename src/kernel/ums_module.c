@@ -38,13 +38,13 @@
  * @schedulers_list: the list of schedulers in the process.
  */
 struct process {
-	pid_t id;
-	struct rhash_head node;
-	spinlock_t lock;
-	int last_sched_dir_name;
-	struct proc_dir_entry *pid_dir;
-	struct proc_dir_entry *schedulers_dir;
-	struct list_head schedulers_list;
+	pid_t			id;
+	struct rhash_head	node;
+	spinlock_t		lock;
+	int			last_sched_dir_name;
+	struct proc_dir_entry	*pid_dir;
+	struct proc_dir_entry	*schedulers_dir;
+	struct list_head	schedulers_list;
 };
 
 /**
@@ -57,14 +57,14 @@ struct process {
  * @last_switch: the time the last switch occurred.
  */
 struct worker_thread {
-	pid_t id;
-	struct rhash_head node;
-	spinlock_t lock;
-	pid_t scheduler;
-	int state;
-	int num_switch;
-	ktime_t running_time;
-	ktime_t last_switch;
+	pid_t			id;
+	struct rhash_head	node;
+	spinlock_t		lock;
+	pid_t			scheduler;
+	int			state;
+	int			num_switch;
+	ktime_t			running_time;
+	ktime_t			last_switch;
 };
 
 /**
@@ -74,7 +74,7 @@ struct worker_thread {
  *                   execute.
  * @num_workers: the number of elements in @completion_list.
  * @dequeued_items: array of PIDs of the workers that are currently ready
- *                  to be runned.
+ *                  to be executed.
  * @num_dequeued_items: the number of elements in @dequeued_items.
  * @dir: the proc directory of the scheduler thread.
  * @workers_dir: the workers directory inside @dir.
@@ -84,20 +84,20 @@ struct worker_thread {
  * @last_switch_start: the time the last switch started.
  */
 struct scheduler_thread {
-	pid_t id;
-	struct rhash_head table_node;
-	struct list_head list_node;
-	spinlock_t lock;
-	pid_t *completion_list;
-	int num_workers;
-	pid_t *dequeued_items;
-	int num_dequeued_items;
-	struct proc_dir_entry *dir;
-	struct proc_dir_entry *workers_dir;
-	pid_t worker;
-	int num_switch;
-	ktime_t last_switch_time;
-	ktime_t last_switch_start;
+	pid_t			id;
+	struct rhash_head	table_node;
+	struct list_head	list_node;
+	spinlock_t		lock;
+	pid_t			*completion_list;
+	int			num_workers;
+	pid_t			*dequeued_items;
+	int			num_dequeued_items;
+	struct proc_dir_entry	*dir;
+	struct proc_dir_entry	*workers_dir;
+	pid_t			worker;
+	int			num_switch;
+	ktime_t			last_switch_time;
+	ktime_t			last_switch_start;
 };
 
 /* Parameters for the device */
@@ -107,16 +107,16 @@ int device_open(struct inode *inode, struct file *file);
 int device_release(struct inode *inode, struct file *file);
 
 static struct file_operations fops = {
-	.unlocked_ioctl = device_ioctl,
-	.open = device_open,
-	.release = device_release,
+	.unlocked_ioctl	= device_ioctl,
+	.open		= device_open,
+	.release	= device_release,
 };
 
 static struct miscdevice mdev = {
-	.minor = 0,
-	.name = DEVICE_NAME,
-	.mode = S_IALLUGO,
-	.fops = &fops,
+	.minor	= 0,
+	.name	= DEVICE_NAME,
+	.mode	= S_IALLUGO,
+	.fops	= &fops,
 };
 
 /* Table containing the processes */
@@ -128,21 +128,21 @@ struct rhashtable scheduler_threads;
 
 /* Parameters for the tables */
 const static struct rhashtable_params worker_thread_table_params = {
-	.key_len = sizeof(pid_t),
-	.key_offset = offsetof(struct worker_thread, id),
-	.head_offset = offsetof(struct worker_thread, node),
+	.key_len	= sizeof(pid_t),
+	.key_offset	= offsetof(struct worker_thread, id),
+	.head_offset	= offsetof(struct worker_thread, node),
 };
 
 const static struct rhashtable_params scheduler_thread_table_params = {
-	.key_len = sizeof(pid_t),
-	.key_offset = offsetof(struct scheduler_thread, id),
-	.head_offset = offsetof(struct scheduler_thread, table_node),
+	.key_len	= sizeof(pid_t),
+	.key_offset	= offsetof(struct scheduler_thread, id),
+	.head_offset	= offsetof(struct scheduler_thread, table_node),
 };
 
 const static struct rhashtable_params process_table_params = {
-	.key_len = sizeof(pid_t),
-	.key_offset = offsetof(struct process, id),
-	.head_offset = offsetof(struct process, node),
+	.key_len	= sizeof(pid_t),
+	.key_offset	= offsetof(struct process, id),
+	.head_offset	= offsetof(struct process, node),
 };
 
 /* Semaphore for accessing the worker_threads table */
@@ -154,16 +154,16 @@ static struct proc_dir_entry *ums_dir;
 /* Parameters for the proc files */
 static int scheduler_open(struct inode *inode, struct file *file);
 static struct proc_ops scheduler_fops = {
-	.proc_open = scheduler_open,
-	.proc_read = seq_read,
-	.proc_release = single_release,
+	.proc_open	= scheduler_open,
+	.proc_read	= seq_read,
+	.proc_release	= single_release,
 };
 
 static int worker_open(struct inode *inode, struct file *file);
 static struct proc_ops worker_fops = {
-	.proc_open = worker_open,
-	.proc_read = seq_read,
-	.proc_release = single_release,
+	.proc_open	= worker_open,
+	.proc_read	= seq_read,
+	.proc_release	= single_release,
 };
 
 int init_module(void)
@@ -208,7 +208,7 @@ int init_module(void)
 		goto fail_ums_dir;
 	}
 
-	printk(KERN_DEBUG MODULE_NAME_LOG "Module intialized successfully\n");
+	printk(KERN_DEBUG MODULE_NAME_LOG "Module initialized successfully\n");
 
 	return SUCCESS;
 
@@ -499,7 +499,6 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 	/* Retrieving process struct */
 	process = rhashtable_lookup_fast(&processes, &process_id,
 					 process_table_params);
-	// check errors
 
 	/* Creating scheduler proc dir */
 	spin_lock(&process->lock);
@@ -604,7 +603,7 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 		return -ENOMEM;
 
 	/**
-	 * Loop until we find at least a ready worker, or all worker have
+	 * Loop until we find at least a ready worker, or all workers have
 	 * terminated, or we are interrupted by a fatal signal.
 	 */
 	while (scheduler->num_dequeued_items == 0) {
@@ -631,7 +630,7 @@ int __dequeue_ums_completion_list_items(pid_t sched_id)
 					 */
 					if (worker->scheduler == -1) {
 						/**
-						 * Assiging the worker to this
+						 * Assigning the worker to this
 						 * scheduler
 						 */
 						worker->scheduler = sched_id;
@@ -737,7 +736,7 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	spin_unlock(&scheduler->lock);
 
 	/**
-	 * Waking worker on the same cpu as the scheduler and putting the
+	 * Waking worker on the same CPU as the scheduler and putting the
 	 * scheduler to sleep.
 	 */
 	set_current_state(TASK_KILLABLE);
@@ -913,12 +912,13 @@ void free_scheduler_thread(struct scheduler_thread *scheduler)
 	char index[INT_DECIMAL_STRING_SIZE(int)];
 	int i;
 
-	/* Removing the scheduler_thread struct from the scheduler_threads table
+	/**
+	 * Removing the scheduler_thread struct from the scheduler_threads table
 	 */
 	rhashtable_remove_fast(&scheduler_threads, &scheduler->table_node,
 			       scheduler_thread_table_params);
 
-	/* Removing the workers structs, proc files and directory */
+	/* Removing the workers' structs, proc files and directory */
 	for (i = 0; i < scheduler->num_workers; i++) {
 		sprintf(index, "%d", i);
 		remove_proc_entry(index, scheduler->workers_dir);

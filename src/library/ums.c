@@ -32,8 +32,8 @@ void close_at_exit() {
 /**
  * Executes a request to the UMS module.
  * If it is not already opened, it opens the file descriptor of the module
- * and registers a function to close the it whe the program exits.
- * If it cannot open the descriptor it setts errno to ENOSYS to indicate that
+ * and registers a function to close it when the program exits.
+ * If it cannot open the descriptor it sets errno to ENOSYS to indicate that
  * the UMS module is not loaded.
  */
 int ums_syscall(unsigned int req_num, void *data)
@@ -98,10 +98,10 @@ void *worker_thread_start_routine(void *ptr)
 	}
 
 	/**
-	 * Registering the worker thread. If successful the thread wiil be
+	 * Registering the worker thread. If successful the thread will be
 	 * blocked until it is scheduler by a ums scheduler. The syscall will
-	 * also put the worker pid in args->thread->pid, notifing the parent
-	 * thread of the succesful creation of the worker
+	 * also put the worker pid in args->thread->pid, notifying the parent
+	 * thread of the successful creation of the worker
 	 */
 	ret = ums_syscall(REGISTER_WORKER_THREAD, &args->thread->pid);
 	if (ret < 0) {
@@ -142,8 +142,8 @@ int create_ums_thread(ums_t *thread, void *(*start_routine)(void *), void *arg)
 		continue;
 
 	/**
-	 * If thread->pid is less then zero it means that the worker thread
-	 * encoutered an error during initialization and set thread->pid to the
+	 * If thread->pid is less than zero it means that the worker thread
+	 * encountered an error during initialization and set thread->pid to the
 	 * error code negated. We then join the thread and return the error to
 	 * the caller
 	 */
@@ -288,7 +288,7 @@ int execute_ums_thread(pid_t thread)
 
 	int ret = ums_syscall(EXECUTE_UMS_THREAD, &thread);
 	if (ret < 0) {
-		/* Error, thread not executed. */
+		/* Error, thread not executed */
 		return -1;
 	}
 

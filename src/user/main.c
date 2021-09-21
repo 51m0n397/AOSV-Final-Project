@@ -133,6 +133,8 @@ void *worker_thread_routine(void *ptr)
 		printf("Worker %d: after yield\n", pid);
 	}
 
+	getchar();
+
 	printf("Worker %d: end\n", pid);
 
 	return NULL;
