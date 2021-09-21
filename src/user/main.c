@@ -8,6 +8,8 @@
 
 #include "../library/ums.h"
 
+#define NUM_YIELDS 100
+
 /* Thread specific key used to store the ready queue of each scheduler */
 pthread_key_t ready_queue_key;
 
@@ -119,15 +121,17 @@ void *worker_thread_routine(void *ptr)
 
 	printf("Worker %d: start\n", pid);
 
-	printf("Worker %d: before yield\n", pid);
+	for (int i = 0; i < NUM_YIELDS; i++) {
+		printf("Worker %d: before yield\n", pid);
 
-	int ret = ums_thread_yield();
-	if (ret < 0) {
-		perror("Error while yielding worker thread");
-		return NULL;
+		int ret = ums_thread_yield();
+		if (ret < 0) {
+			perror("Error while yielding worker thread");
+			return NULL;
+		}
+
+		printf("Worker %d: after yield\n", pid);
 	}
-
-	printf("Worker %d: after yield\n", pid);
 
 	printf("Worker %d: end\n", pid);
 
