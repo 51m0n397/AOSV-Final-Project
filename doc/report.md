@@ -49,5 +49,3 @@ The delay introduced by both can vary significantly, which explains the high dev
 
 # Conclusions
 The decision to implement the functionality as a kernel module is the main limiting factor. While it is definitely easier to develop a module than to patch the kernel, it severely restricts what can be done. An example is the impossibility to directly call [context_switch()](https://elixir.bootlin.com/linux/v5.11.2/source/kernel/sched/core.c#L4276) to switch from a scheduler to a worker. The use of yield_to() does not ensure that the worker will be immediately executed, the OS scheduler might pick another thread from another process to be executed before. It is then safe to assume that better performance results could be achieved by changing directly the kernel source code.
-
-# References
