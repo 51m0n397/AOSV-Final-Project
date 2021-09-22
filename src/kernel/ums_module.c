@@ -385,15 +385,12 @@ int __register_worker_thread(pid_t worker_id, pid_t *userspace_worker_id)
 				       scheduler_thread_table_params);
 
 	/* Updating scheduler struct */
-	if (scheduler != NULL) {
-		spin_lock(&scheduler->lock);
-		scheduler->last_switch_time =
-			ktime_sub(now, scheduler->last_switch_start);
-		printk(KERN_DEBUG MODULE_NAME_LOG
-		       "Switched to worker %d in %lld ns\n",
-		       worker_id, ktime_to_ns(scheduler->last_switch_time));
-		spin_unlock(&scheduler->lock);
-	}
+	spin_lock(&scheduler->lock);
+	scheduler->last_switch_time =
+		ktime_sub(now, scheduler->last_switch_start);
+	printk(KERN_DEBUG MODULE_NAME_LOG "Switched to worker %d in %lld ns\n",
+	       worker_id, ktime_to_ns(scheduler->last_switch_time));
+	spin_unlock(&scheduler->lock);
 
 	/* Updating worker struct */
 	spin_lock(&worker->lock);
@@ -417,15 +414,11 @@ int __worker_thread_terminated(pid_t worker_id)
 	struct worker_thread *worker;
 	struct task_struct *pcb;
 
-	down_read(&worker_lock);
-
 	/* Retrieving worker_tread struct from the worker_threads table */
 	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
 					worker_thread_table_params);
-	if (worker == NULL) {
-		up_read(&worker_lock);
+	if (worker == NULL)
 		return -ESRCH;
-	}
 
 	spin_lock(&worker->lock);
 
@@ -438,8 +431,6 @@ int __worker_thread_terminated(pid_t worker_id)
 	worker->scheduler = -1;
 
 	spin_unlock(&worker->lock);
-
-	up_read(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n",
 	       worker_id, pcb->pid);
@@ -509,7 +500,6 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 		ret = -ENOMEM;
 		goto fail_dir;
 	}
-	spin_unlock(&process->lock);
 
 	/* Creating scheduler info file */
 	if (!proc_create_data("info", 0, scheduler->dir, &scheduler_fops,
@@ -542,6 +532,8 @@ int __register_scheduler_thread(pid_t sched_id, pid_t process_id,
 					    scheduler_thread_table_params);
 	if (ret < 0)
 		goto fail_insert;
+	
+	spin_unlock(&process->lock);
 
 	return SUCCESS;
 
@@ -706,15 +698,12 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	if (scheduler == NULL)
 		return -ESRCH;
 
-	down_read(&worker_lock);
 
 	/* Retrieving worker_thread struct from the worker_threads table */
 	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
 					worker_thread_table_params);
-	if (worker == NULL) {
-		up_read(&worker_lock);
+	if (worker == NULL)
 		return -ESRCH;
-	}
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "scheduler:%d executing worker:%d\n",
 	       sched_id, worker_id);
@@ -725,8 +714,6 @@ int __execute_ums_thread(pid_t sched_id, pid_t worker_id, const cpumask_t *cpu)
 	worker->num_switch++;
 	pcb = pid_task(find_vpid(worker->id), PIDTYPE_PID);
 	spin_unlock(&worker->lock);
-
-	up_read(&worker_lock);
 
 	/* Updating Scheduler struct */
 	spin_lock(&scheduler->lock);
@@ -764,15 +751,11 @@ int __ums_thread_yield(pid_t id)
 	struct task_struct *pcb;
 	ktime_t now;
 
-	down_read(&worker_lock);
-
 	/* Retrieving worker_thread struct from the worker_threads table */
 	worker = rhashtable_lookup_fast(&worker_threads, &id,
 					worker_thread_table_params);
-	if (worker == NULL) {
-		down_read(&worker_lock);
+	if (worker == NULL)
 		return -ESRCH;
-	}
 
 	spin_lock(&worker->lock);
 
@@ -787,8 +770,6 @@ int __ums_thread_yield(pid_t id)
 	set_current_state(TASK_KILLABLE);
 
 	spin_unlock(&worker->lock);
-
-	up_read(&worker_lock);
 
 	printk(KERN_DEBUG MODULE_NAME_LOG "worker:%d waking scheduler:%d\n", id,
 	       pcb->pid);
@@ -809,15 +790,12 @@ int __ums_thread_yield(pid_t id)
 				       scheduler_thread_table_params);
 
 	/* Updating scheduler struct */
-	if (scheduler != NULL) {
-		spin_lock(&scheduler->lock);
-		scheduler->last_switch_time =
-			ktime_sub(now, scheduler->last_switch_start);
-		printk(KERN_DEBUG MODULE_NAME_LOG
-		       "Switched to worker %d in %lld ns\n",
-		       id, ktime_to_ns(scheduler->last_switch_time));
-		spin_unlock(&scheduler->lock);
-	}
+	spin_lock(&scheduler->lock);
+	scheduler->last_switch_time =
+		ktime_sub(now, scheduler->last_switch_start);
+	printk(KERN_DEBUG MODULE_NAME_LOG "Switched to worker %d in %lld ns\n",
+	       id, ktime_to_ns(scheduler->last_switch_time));
+	spin_unlock(&scheduler->lock);
 
 	/* Updating worker struct */
 	spin_lock(&worker->lock);
@@ -897,6 +875,8 @@ void free_worker_thread(int worker_id)
 {
 	struct worker_thread *worker;
 
+	down_write(&worker_lock);
+
 	worker = rhashtable_lookup_fast(&worker_threads, &worker_id,
 					worker_thread_table_params);
 
@@ -905,6 +885,8 @@ void free_worker_thread(int worker_id)
 				       worker_thread_table_params);
 		kfree(worker);
 	}
+
+	up_write(&worker_lock);
 }
 
 void free_scheduler_thread(struct scheduler_thread *scheduler)
